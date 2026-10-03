@@ -61,7 +61,8 @@ def create_app() -> FastAPI:
 
     @app.exception_handler(DomainError)
     async def domain_error_handler(_: Request, exc: DomainError):
-        return JSONResponse(status_code=exc.status_code,
+        headers = {"Retry-After": str(exc.extra["retry_after"])} if "retry_after" in exc.extra else None
+        return JSONResponse(status_code=exc.status_code, headers=headers,
                             content={"detail": exc.message, "code": exc.code, **exc.extra})
 
     events.clear_subscribers()  # create_app() may run more than once (tests)

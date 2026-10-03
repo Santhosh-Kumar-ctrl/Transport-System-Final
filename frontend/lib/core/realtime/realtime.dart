@@ -59,8 +59,9 @@ class RealtimeClient {
     final token = _token();
     if (_closed || token == null) return;
     try {
-      final ch = WebSocketChannel.connect(Uri.parse('${AppConfig.wsBase}/ws?token=$token'));
+      final ch = WebSocketChannel.connect(Uri.parse('${AppConfig.wsBase}/ws'));
       await ch.ready;
+      ch.sink.add(jsonEncode({'token': token}));
       _ch = ch;
       _attempt = 0;
       for (final t in _topics) {
@@ -104,8 +105,8 @@ class RealtimeClient {
 
 /// One client per signed-in user (token refreshes don't reconnect).
 final realtimeProvider = Provider<RealtimeClient?>((ref) {
-  final userId = ref.watch(sessionProvider.select((s) => s?.user.id));
-  if (userId == null) return null;
+  final accessToken = ref.watch(sessionProvider.select((s) => s?.accessToken));
+  if (accessToken == null) return null;
   final client = RealtimeClient(() => ref.read(sessionProvider)?.accessToken);
   ref.onDispose(client.dispose);
   return client;

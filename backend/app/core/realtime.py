@@ -21,7 +21,9 @@ from typing import Any
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from app.core.deps import Principal, principal_from_token
+from app.core.deps import Principal, authenticated_principal
+from app.core.db import SessionLocal
+from app.core.access import can_subscribe
 from app.core.errors import DomainError
 from app.core.events import jsonable
 from app.core.roles import Role
@@ -36,13 +38,16 @@ class Hub:
         self._by_topic: dict[str, set[WebSocket]] = defaultdict(set)
         self._topics_of: dict[WebSocket, set[str]] = defaultdict(set)
         self._principal: dict[WebSocket, Principal] = {}
+        self._tokens: dict[WebSocket, str] = {}
 
-    def add(self, ws: WebSocket, p: Principal) -> None:
+    def add(self, ws: WebSocket, p: Principal, token: str) -> None:
         self._principal[ws] = p
+        self._tokens[ws] = token
         self._by_user[p.id].add(ws)
         self._by_role[p.role].add(ws)
 
     def remove(self, ws: WebSocket) -> None:
+        self._tokens.pop(ws, None)
         p = self._principal.pop(ws, None)
         if p:
             self._by_user[p.id].discard(ws)
@@ -62,10 +67,19 @@ class Hub:
         if not sockets:
             return
         frame = {"type": msg_type, "data": jsonable(data)}
+        live = []
+        for ws in list(sockets):
+            try:
+                async with SessionLocal() as session:
+                    await authenticated_principal(self._tokens[ws], session)
+                live.append(ws)
+            except (DomainError, KeyError):
+                await ws.close(code=4401)
+                self.remove(ws)
         results = await asyncio.gather(
-            *(ws.send_json(frame) for ws in list(sockets)), return_exceptions=True
+            *(ws.send_json(frame) for ws in live), return_exceptions=True
         )
-        for ws, res in zip(list(sockets), results):
+        for ws, res in zip(live, results):
             if isinstance(res, Exception):
                 self.remove(ws)
 
@@ -82,7 +96,14 @@ class Hub:
         await self._send(self._by_role.get(role, set()), msg_type, data)
 
     async def send_to_topic(self, topic: str, msg_type: str, data: Any) -> None:
-        await self._send(self._by_topic.get(topic, set()), msg_type, data)
+        permitted = set()
+        async with SessionLocal() as session:
+            for ws in list(self._by_topic.get(topic, set())):
+                if await can_subscribe(session, self._principal[ws], topic):
+                    permitted.add(ws)
+                else:
+                    self.unsubscribe(ws, topic)
+        await self._send(permitted, msg_type, data)
 
     def connection_count(self) -> int:
         return len(self._principal)
@@ -93,28 +114,44 @@ router = APIRouter(tags=["realtime"])
 
 
 @router.websocket("/ws")
-async def websocket_endpoint(ws: WebSocket, token: str) -> None:
+async def websocket_endpoint(ws: WebSocket) -> None:
+    # Authenticate in a first frame rather than a URL, which proxies often log.
+    await ws.accept()
     try:
-        principal = principal_from_token(token)
+        auth = await asyncio.wait_for(ws.receive_json(), timeout=10)
+        token = auth.get("token") if isinstance(auth, dict) else None
+        if not isinstance(token, str) or len(token) > 4096:
+            await ws.close(code=4401)
+            return
+        async with SessionLocal() as session:
+            principal = await authenticated_principal(token, session)
+        hub.add(ws, principal, token)
+        while True:
+            # Periodic wake means even idle sockets expire/revoke within 30 seconds.
+            try:
+                msg = await asyncio.wait_for(ws.receive_json(), timeout=30)
+            except asyncio.TimeoutError:
+                msg = {}
+            async with SessionLocal() as session:
+                await authenticated_principal(token, session)
+                action = msg.get("action") if isinstance(msg, dict) else None
+                topic = msg.get("topic") if isinstance(msg, dict) else None
+                if action == "subscribe" and isinstance(topic, str):
+                    if (len(hub._topics_of[ws]) >= 20 or
+                            not await can_subscribe(session, principal, topic)):
+                        await ws.send_json({"type": "error", "data": {"code": "forbidden_topic"}})
+                    else:
+                        hub.subscribe(ws, topic)
+                elif action == "unsubscribe" and isinstance(topic, str):
+                    hub.unsubscribe(ws, topic)
+                elif action == "ping":
+                    await ws.send_json({"type": "pong", "data": {}})
     except DomainError:
         await ws.close(code=4401)
-        return
-    await ws.accept()
-    hub.add(ws, principal)
-    try:
-        while True:
-            msg = await ws.receive_json()
-            action = msg.get("action") if isinstance(msg, dict) else None
-            topic = msg.get("topic") if isinstance(msg, dict) else None
-            if action == "subscribe" and isinstance(topic, str):
-                hub.subscribe(ws, topic)
-            elif action == "unsubscribe" and isinstance(topic, str):
-                hub.unsubscribe(ws, topic)
-            elif action == "ping":
-                await ws.send_json({"type": "pong", "data": {}})
     except WebSocketDisconnect:
         pass
     except Exception:  # noqa: BLE001
         log.exception("WebSocket error")
+        await ws.close(code=1011)
     finally:
         hub.remove(ws)

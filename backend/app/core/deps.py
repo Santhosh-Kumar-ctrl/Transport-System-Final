@@ -2,6 +2,8 @@ from dataclasses import dataclass
 
 from fastapi import Depends
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from sqlalchemy.ext.asyncio import AsyncSession
+from app.core.db import get_session
 
 from app.core.errors import Forbidden, Unauthorized
 from app.core.roles import Role
@@ -12,11 +14,7 @@ _bearer = HTTPBearer(auto_error=False)
 
 @dataclass(frozen=True)
 class Principal:
-    """The authenticated caller, decoded from the access token (no DB hit).
-
-    A deactivated user keeps access until their access token expires
-    (ACCESS_TOKEN_MINUTES); refresh is refused for inactive users.
-    """
+    """The authenticated caller; request authorization also checks current DB state."""
 
     id: int
     role: Role
@@ -27,15 +25,30 @@ class Principal:
 
 def principal_from_token(token: str) -> Principal:
     claims = verify(token, "access")
-    return Principal(id=int(claims["sub"]), role=Role(claims["role"]))
+    try:
+        return Principal(id=int(claims["sub"]), role=Role(claims["role"]))
+    except (KeyError, ValueError, TypeError) as exc:
+        raise Unauthorized("Invalid token", code="token_invalid") from exc
+
+
+async def authenticated_principal(token: str, session: AsyncSession) -> Principal:
+    from app.modules.auth.models import User
+    claims = verify(token, "access")
+    p = principal_from_token(token)
+    user = await session.get(User, p.id, populate_existing=True)
+    if (user is None or not user.is_active or user.role != p.role
+            or claims.get("ver") != user.token_version):
+        raise Unauthorized("Session revoked", code="token_invalid")
+    return p
 
 
 async def current_principal(
     creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
+    session: AsyncSession = Depends(get_session),
 ) -> Principal:
     if creds is None:
         raise Unauthorized("Not authenticated")
-    return principal_from_token(creds.credentials)
+    return await authenticated_principal(creds.credentials, session)
 
 
 def require_roles(*roles: Role):

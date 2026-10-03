@@ -1,7 +1,9 @@
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import throttle
 from app.core.db import get_session
+from app.core.errors import Unauthorized
 from app.core.deps import Principal, current_principal, require_roles
 from app.core.roles import Role
 from app.modules.auth import service
@@ -12,13 +14,24 @@ admin_only = require_roles(Role.ADMIN)
 
 
 @router.post("/auth/login", response_model=TokenPair)
-async def login(body: LoginIn, session: AsyncSession = Depends(get_session)):
-    return await service.login(session, body.email, body.password)
+async def login(request: Request, body: LoginIn, session: AsyncSession = Depends(get_session)):
+    ip = request.client.host if request.client else "unknown"
+    throttle.check(body.email, ip)
+    try:
+        result = await service.login(session, body.email, body.password)
+    except Unauthorized:
+        throttle.record_failure(body.email, ip)
+        raise
+    await session.commit()
+    throttle.record_success(body.email)
+    return result
 
 
 @router.post("/auth/refresh", response_model=TokenPair)
 async def refresh(body: RefreshIn, session: AsyncSession = Depends(get_session)):
-    return await service.refresh(session, body.refresh_token)
+    result = await service.refresh(session, body.refresh_token)
+    await session.commit()
+    return result
 
 
 @router.get("/auth/me", response_model=UserOut)
