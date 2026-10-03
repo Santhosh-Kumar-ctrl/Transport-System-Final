@@ -1,3 +1,4 @@
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -9,9 +10,19 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://transit:transit@localhost:5433/transit"
     test_database_url: str = "postgresql+asyncpg://transit:transit@localhost:5433/transit_test"
 
-    jwt_secret: str = "dev-secret-change-me-dev-secret-change-me"
+    jwt_secret: str = Field(min_length=32)
+
+    @field_validator("jwt_secret")
+    @classmethod
+    def reject_placeholder_secret(cls, value: str) -> str:
+        if value in {"dev-secret-change-me-dev-secret-change-me",
+                     "change-me-to-a-long-random-string"}:
+            raise ValueError("Set JWT_SECRET to a fresh random secret of at least 32 characters")
+        return value
     access_token_minutes: int = 30
     refresh_token_days: int = 7
+    login_max_failures: int = 5  # failed logins per email (or per IP x10) before a temporary lockout
+    login_lockout_seconds: int = 900
     bcrypt_rounds: int = 12  # tests lower this for speed
 
     # College-local timezone: schedules ("07:30 departure") are interpreted in it.
@@ -33,10 +44,10 @@ class Settings(BaseSettings):
     arrival_lookahead_stops: int = 2  # auto-arrival considers only the next N unreached stops
 
     # Lets admins pass explicit timestamps (e.g. arrived_at) to simulate delays in demos.
-    allow_simulation: bool = True
+    allow_simulation: bool = False
     enable_background_tasks: bool = True
 
-    cors_origins: str = "*"
+    cors_origins: str = "http://localhost:3000"
 
     @property
     def cors_origin_list(self) -> list[str]:

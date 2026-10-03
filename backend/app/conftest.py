@@ -8,6 +8,7 @@ os.environ["DATABASE_URL"] = os.environ.get(
 )
 os.environ["ENABLE_BACKGROUND_TASKS"] = "false"
 os.environ["BCRYPT_ROUNDS"] = "4"
+os.environ["ALLOW_SIMULATION"] = "true"  # Fixtures explicitly opt into demo timestamps.
 
 from datetime import datetime, time, timedelta  # noqa: E402
 from itertools import count  # noqa: E402
@@ -39,6 +40,8 @@ async def _schema():
 
 @pytest.fixture(autouse=True)
 async def _clean_db():
+    from app.core import throttle
+    throttle.reset()
     yield
     await events.drain()
     tables = ", ".join(t.name for t in metadata.sorted_tables)

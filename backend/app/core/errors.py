@@ -40,3 +40,8 @@ class Unauthorized(DomainError):
 class InvalidState(DomainError):
     status_code = 422
     code = "invalid_state"
+
+
+class TooManyRequests(DomainError):
+    status_code = 429
+    code = "too_many_attempts"

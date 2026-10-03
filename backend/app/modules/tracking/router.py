@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_session
+from app.core.access import authorize_trip
 from app.core.deps import Principal, current_principal, require_roles
 from app.core.roles import Role
 from app.modules.tracking import service
@@ -23,8 +24,9 @@ async def report_positions(trip_id: int, body: PositionBatchIn,
 
 
 @router.get("/trips/{trip_id}/live", response_model=LiveTrip)
-async def trip_live(trip_id: int, _: Principal = Depends(current_principal),
+async def trip_live(trip_id: int, p: Principal = Depends(current_principal),
                     session: AsyncSession = Depends(get_session)):
+    await authorize_trip(session, p, trip_id)
     return await service.live_trip(session, trip_id)
 
 

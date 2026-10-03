@@ -176,6 +176,8 @@ async def test_live_views_carry_stops_and_latest_position(world):
     assert live[0]["next_stop_sequence"] == 2
     student = await world.user(Role.STUDENT)
     await world.get("/tracking/live", who=student, expect=403)
+    await world.get(f"/trips/{tid}/live", who=student, expect=403)
+    await world.allocate(student, w["route"], 0)
     assert (await world.get(f"/trips/{tid}/live", who=student)).json()["position"] is not None
 
 
