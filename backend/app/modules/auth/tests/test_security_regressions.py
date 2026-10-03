@@ -182,3 +182,7 @@ async def test_send_to_topic_survives_socket_removed_mid_iteration(monkeypatch):
     monkeypatch.setattr(realtime, 'can_subscribe', allowed)
     monkeypatch.setattr(realtime, 'authenticated_principal', authenticate)
     await hub.send_to_topic('trip:1', 'ping', {})  # used to raise KeyError
+    # Topic members are a set, so either socket can be checked first.
+    survivor, removed = (first, second) if first in hub._principal else (second, first)
+    assert survivor.sent == [{'type': 'ping', 'data': {}}]
+    assert removed.sent == []
