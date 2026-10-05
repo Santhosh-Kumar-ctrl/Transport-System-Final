@@ -33,6 +33,7 @@ Not here: when buses run (trips), who rides (allocation).
 | Method | Path | Role | Purpose |
 |---|---|---|---|
 | GET | `/buses` | admin, driver | list |
+| GET | `/buses/{id}` | admin, driver | one bus |
 | POST / PATCH / DELETE | `/buses[/{id}]` | admin | manage (delete refused if referenced → retire instead) |
 | PUT | `/buses/{id}/driver` `{driver_id \| null, move?}` | admin | assign / change / remove the bus's driver. 409 `driver_taken` (with the other bus) unless `move: true` |
 | GET | `/stops?q=` | any | list/search |

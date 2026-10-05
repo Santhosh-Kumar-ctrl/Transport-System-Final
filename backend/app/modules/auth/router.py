@@ -1,10 +1,11 @@
 from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core import throttle
+from app.core.config import settings
 from app.core.db import get_session
 from app.core.errors import Unauthorized
 from app.core.deps import Principal, current_principal, require_roles
+from app.core.ratelimit import RateLimiter
 from app.core.roles import Role
 from app.modules.auth import service
 from app.modules.auth.schemas import LoginIn, RefreshIn, TokenPair, UserCreate, UserOut, UserUpdate
@@ -12,19 +13,17 @@ from app.modules.auth.schemas import LoginIn, RefreshIn, TokenPair, UserCreate, 
 router = APIRouter(tags=["auth"])
 admin_only = require_roles(Role.ADMIN)
 
+# Per IP + email, so password guessing on one account is slowed down without locking out a whole
+# campus behind one NAT address.
+login_limit = RateLimiter("login", limit=settings.login_attempts_per_minute, window_seconds=60,
+                          message="Too many sign-in attempts. Wait a minute and try again.")
+
 
 @router.post("/auth/login", response_model=TokenPair)
-async def login(request: Request, body: LoginIn, session: AsyncSession = Depends(get_session)):
-    ip = request.client.host if request.client else "unknown"
-    throttle.check(body.email, ip)
-    try:
-        result = await service.login(session, body.email, body.password)
-    except Unauthorized:
-        throttle.record_failure(body.email, ip)
-        raise
-    await session.commit()
-    throttle.record_success(body.email)
-    return result
+async def login(body: LoginIn, request: Request, session: AsyncSession = Depends(get_session)):
+    ip = request.client.host if request.client else "?"
+    login_limit.hit(f"{ip}|{body.email.lower()}")
+    return await service.login(session, body.email, body.password)
 
 
 @router.post("/auth/refresh", response_model=TokenPair)
@@ -44,8 +43,8 @@ async def list_users(
     role: Role | None = None,
     q: str | None = None,
     active: bool | None = None,
-    limit: int = Query(100, le=500),
-    offset: int = 0,
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
     _: Principal = Depends(admin_only),
     session: AsyncSession = Depends(get_session),
 ):

@@ -4,9 +4,9 @@ One app, three role areas chosen at login:
 
 | Role | Area | Home |
 |---|---|---|
-| student | `/student` | My line: next bus at my stop, live line diagram, **Scan to board** |
-| driver | `/driver` | Today's runs, then the run screen (ARRIVED per stop, boarding QR, riders, running late) |
-| admin | `/admin` | Live departure board, network, fleet, people, allocation, schedules, reports |
+| student | `/student` | My line: next bus at my stop, live line diagram, **Scan to board**; **Reports**: report a problem, follow the reply |
+| driver | `/driver` | Today's runs, then the run screen (ARRIVED per stop, boarding QR, riders, running late, found item) |
+| admin | `/admin` | Live departure board, network, fleet, people, allocation, schedules, reports, **Issues** (student reports with the agent's evidence, found items) |
 
 ## Run
 ```bash
@@ -65,3 +65,27 @@ flutter analyze
 flutter test                                                          # unit tests
 flutter test test/screenshots_test.dart --run-skipped --update-goldens  # design review PNGs
 ```
+
+## Sessions and live updates
+- **Session storage:** encrypted platform storage on phones (`flutter_secure_storage`), browser
+  storage on web (`SessionController.store`). A session saved in plain preferences by an older
+  version is moved over on first launch.
+- **Token renewal:** the app signs out only when `/auth/refresh` answers 401 (session expired,
+  revoked or account deactivated). A timeout or server error keeps the session, so a driver on
+  patchy data keeps sharing the bus's location.
+- **WebSocket:** the access token goes in the first frame (`{"action":"auth"}`), never in the URL.
+  On close code 4401 the client renews the token, then reconnects. Subscriptions to topics the user
+  may not follow are answered with an `error` frame, which the client ignores.
+- **Admin board:** ignores `position` messages (the live map uses those) and refetches at most once
+  every 2 s for a burst of updates.
+
+## Release builds
+- **Web:** `flutter build web --release --dart-define=API_BASE=https://api.<domain> --dart-define=TILE_URL=...`
+  (see [docs/DEPLOY.md](../docs/DEPLOY.md)). The "paste the boarding code" box exists in debug builds only.
+- **Android:** release builds refuse plain `http://` (cleartext is allowed in debug builds only) and
+  are signed with the key in `android/key.properties` (git-ignored; see docs/DEPLOY.md).
+
+## Dependencies
+`flutter pub upgrade` was run on 2026-10-04. Still behind (held back by other packages or the
+Flutter SDK, not by this app): `wakelock_plus` 1.8.1, `qr` 4.x (pinned by `qr_flutter`), `dbus`,
+`gsettings`, `material_color_utilities`, `test_api`. Check again with `flutter pub outdated`.

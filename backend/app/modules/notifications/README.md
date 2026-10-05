@@ -21,6 +21,9 @@
 | `UnallocatedBoarding` | | ✓ | ✓ |
 | `StudentAllocated` / `AllocationChanged` / `AllocationEnded` | that student | | |
 | `BusDriverAssigned` | | new driver ("You're now driving bus …") and previous driver | |
+| `ReportAnalysed` (reports, first analysis only) | | | ✓ severity from the report: critical / high → warning / info |
+| `ReportFollowUp` | | | ✓ |
+| `ReportReplied` / `ReportClosed` / `LostItemMatched` | the student who sent the report (looked up via `reports.service.recipient_id`; payloads carry no student id) | | |
 
 Severity: `info` / `warning` / `critical` (delays ≥ 15 min and over-capacity are critical).
 
@@ -38,6 +41,9 @@ Severity: `info` / `warning` / `critical` (delays ≥ 15 min and over-capacity a
 | POST | `/notifications/read-all` | any |
 
 WebSocket: each stored notification is pushed as `{"type":"notification","data":{…}}` to the user.
+
+Housekeeping: read notifications older than `NOTIFICATION_RETENTION_DAYS` (180) are deleted
+(job `notification-retention`, every 6 h). Unread ones are kept.
 
 ## Consumes
 All events in `service.HANDLED_EVENTS`.

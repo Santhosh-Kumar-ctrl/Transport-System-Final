@@ -6,17 +6,30 @@ Channels a socket receives from:
   * topics it asked for, e.g. "route:3" or "trip:12" -> hub.send_to_topic("trip:12", msg)
 
 Client protocol (JSON text frames):
+  -> {"action": "auth", "token": "<access token>"}   first frame, within AUTH_TIMEOUT_SECONDS
+  <- {"type": "authenticated", "data": {}}
   -> {"action": "subscribe", "topic": "route:3"}
+  <- {"type": "error", "data": {"topic": "route:3", "code": "forbidden"}}   if not allowed
   -> {"action": "unsubscribe", "topic": "route:3"}
   -> {"action": "ping"}                      <- {"type": "pong"}
   <- {"type": "<message type>", "data": {...}}
+
+The token is sent in a frame, not the URL, so it never ends up in access logs. The server closes
+the socket with code 4401 when the token is missing, invalid, expired or revoked; the client then
+refreshes its token and reconnects.
+
+Topics are access-controlled: each prefix ("route", "trip") has a policy that the owning module
+registers with `set_topic_policy` in its `register()`. Admins may subscribe to anything; a topic
+without a policy is refused.
 
 In-memory and single-process. To run several API workers, back this with Redis pub/sub.
 """
 
 import asyncio
 import logging
+import time
 from collections import defaultdict
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -29,6 +42,47 @@ from app.core.events import jsonable
 from app.core.roles import Role
 
 log = logging.getLogger("transit.realtime")
+
+AUTH_TIMEOUT_SECONDS = 5
+SEND_TIMEOUT_SECONDS = 5
+CLOSE_UNAUTHORIZED = 4401
+
+TopicPolicy = Callable[[Principal, int], Awaitable[bool]]
+SessionCheck = Callable[[Principal], Awaitable[bool]]
+
+_topic_policies: dict[str, TopicPolicy] = {}
+_session_check: SessionCheck | None = None
+
+
+def set_topic_policy(prefix: str, policy: TopicPolicy) -> None:
+    """Who may subscribe to "<prefix>:<id>" topics. Admins always may."""
+    _topic_policies[prefix] = policy
+
+
+def set_session_check(check: SessionCheck) -> None:
+    """Extra check on connect: is the account behind the token still active and not revoked?"""
+    global _session_check
+    _session_check = check
+
+
+def clear_policies() -> None:
+    global _session_check
+    _topic_policies.clear()
+    _session_check = None
+
+
+async def can_subscribe(p: Principal, topic: str) -> bool:
+    prefix, _, raw = topic.partition(":")
+    policy = _topic_policies.get(prefix)
+    if policy is None or not raw.isdigit():
+        return False
+    if p.role == Role.ADMIN:
+        return True
+    try:
+        return await policy(p, int(raw))
+    except Exception:  # noqa: BLE001 - a failing policy denies, never crashes the socket
+        log.exception("Topic policy for %s failed", topic)
+        return False
 
 
 class Hub:
@@ -64,7 +118,10 @@ class Hub:
         self._topics_of[ws].discard(topic)
 
     async def _send(self, sockets: set[WebSocket], msg_type: str, data: Any) -> None:
-        if not sockets:
+        # Snapshot once: the live set can change while we await (someone connects or leaves),
+        # and results must line up with the sockets they came from.
+        targets = list(sockets)
+        if not targets:
             return
         frame = {"type": msg_type, "data": jsonable(data)}
         live = []
@@ -77,10 +134,11 @@ class Hub:
                 await ws.close(code=4401)
                 self.remove(ws)
         results = await asyncio.gather(
-            *(ws.send_json(frame) for ws in live), return_exceptions=True
+            *(asyncio.wait_for(ws.send_json(frame), SEND_TIMEOUT_SECONDS) for ws in targets),
+            return_exceptions=True,
         )
-        for ws, res in zip(live, results):
-            if isinstance(res, Exception):
+        for ws, res in zip(targets, results):
+            if isinstance(res, BaseException):
                 self.remove(ws)
 
     async def send_to_user(self, user_id: int, msg_type: str, data: Any) -> None:
@@ -109,6 +167,15 @@ class Hub:
                     self.unsubscribe(ws, topic)
         await self._send(permitted, msg_type, data)
 
+    async def disconnect_user(self, user_id: int) -> None:
+        """Close every socket of a user (sessions revoked); their app must sign in again."""
+        for ws in list(self._by_user.get(user_id, ())):
+            self.remove(ws)
+            try:
+                await ws.close(code=CLOSE_UNAUTHORIZED)
+            except Exception:  # noqa: BLE001 - already gone
+                pass
+
     def connection_count(self) -> int:
         return len(self._principal)
 
@@ -117,41 +184,57 @@ hub = Hub()
 router = APIRouter(tags=["realtime"])
 
 
+async def _authenticate(ws: WebSocket) -> Principal | None:
+    try:
+        msg = await asyncio.wait_for(ws.receive_json(), AUTH_TIMEOUT_SECONDS)
+    except (asyncio.TimeoutError, ValueError):
+        return None
+    if not isinstance(msg, dict) or msg.get("action") != "auth" or not isinstance(msg.get("token"), str):
+        return None
+    try:
+        principal = principal_from_token(msg["token"])
+    except DomainError:
+        return None
+    if _session_check is not None and not await _session_check(principal):
+        return None
+    return principal
+
+
 @router.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket) -> None:
-    # Authenticate in a first frame rather than a URL, which proxies often log.
     await ws.accept()
     try:
-        auth = await asyncio.wait_for(ws.receive_json(), timeout=10)
-        token = auth.get("token") if isinstance(auth, dict) else None
-        if not isinstance(token, str) or len(token) > 4096:
-            await ws.close(code=4401)
-            return
-        async with SessionLocal() as session:
-            principal = await authenticated_principal(token, session)
-        hub.add(ws, principal, token)
+        principal = await _authenticate(ws)
+    except WebSocketDisconnect:
+        return
+    if principal is None:
+        await ws.close(code=CLOSE_UNAUTHORIZED)
+        return
+    hub.add(ws, principal)
+    try:
+        await ws.send_json({"type": "authenticated", "data": {}})
         while True:
-            # Periodic wake means even idle sockets expire/revoke within 30 seconds.
+            # The socket lives only as long as its token: then the client refreshes and reconnects.
+            remaining = principal.expires_at - time.time() if principal.expires_at else None
+            if remaining is not None and remaining <= 0:
+                await ws.close(code=CLOSE_UNAUTHORIZED)
+                break
             try:
-                msg = await asyncio.wait_for(ws.receive_json(), timeout=30)
+                msg = await asyncio.wait_for(ws.receive_json(), timeout=remaining)
             except asyncio.TimeoutError:
-                msg = {}
-            async with SessionLocal() as session:
-                await authenticated_principal(token, session)
-                action = msg.get("action") if isinstance(msg, dict) else None
-                topic = msg.get("topic") if isinstance(msg, dict) else None
-                if action == "subscribe" and isinstance(topic, str):
-                    if (len(hub._topics_of[ws]) >= 20 or
-                            not await can_subscribe(session, principal, topic)):
-                        await ws.send_json({"type": "error", "data": {"code": "forbidden_topic"}})
-                    else:
-                        hub.subscribe(ws, topic)
-                elif action == "unsubscribe" and isinstance(topic, str):
-                    hub.unsubscribe(ws, topic)
-                elif action == "ping":
-                    await ws.send_json({"type": "pong", "data": {}})
-    except DomainError:
-        await ws.close(code=4401)
+                await ws.close(code=CLOSE_UNAUTHORIZED)
+                break
+            action = msg.get("action") if isinstance(msg, dict) else None
+            topic = msg.get("topic") if isinstance(msg, dict) else None
+            if action == "subscribe" and isinstance(topic, str):
+                if await can_subscribe(principal, topic):
+                    hub.subscribe(ws, topic)
+                else:
+                    await ws.send_json({"type": "error", "data": {"topic": topic, "code": "forbidden"}})
+            elif action == "unsubscribe" and isinstance(topic, str):
+                hub.unsubscribe(ws, topic)
+            elif action == "ping":
+                await ws.send_json({"type": "pong", "data": {}})
     except WebSocketDisconnect:
         pass
     except Exception:  # noqa: BLE001

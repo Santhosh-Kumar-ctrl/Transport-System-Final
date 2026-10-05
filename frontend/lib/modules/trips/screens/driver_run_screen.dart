@@ -9,6 +9,7 @@ import '../../../design/design.dart';
 import '../../boarding/data/boarding_api.dart';
 import '../../dashboard/data/dashboard_api.dart';
 import '../../delay_monitor/widgets/report_delay_sheet.dart';
+import '../../reports/widgets/log_found_item_sheet.dart';
 import '../../tracking/data/tracking_api.dart';
 import '../../tracking/state/position_reporter.dart';
 import '../../tracking/widgets/live_map.dart';
@@ -160,6 +161,18 @@ class _DriverRunScreenState extends ConsumerState<DriverRunScreen> {
                         ],
                       ),
                     ],
+                  ),
+                ),
+              if (t.running || t.status == TripStatus.completed)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(Space.gutter, Space.s, Space.gutter, 0),
+                  child: SignButton(
+                    label: 'Found item',
+                    icon: Icons.backpack_outlined,
+                    kind: SignButtonKind.onDark,
+                    height: 50,
+                    expand: true,
+                    onPressed: () => showLogFoundItemSheet(context, tripId: t.id),
                   ),
                 ),
               Expanded(

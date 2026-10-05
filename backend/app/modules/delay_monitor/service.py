@@ -7,17 +7,24 @@ Delay = actual time - scheduled time, observed when:
   * a driver/admin reports it manually
 
 Alerting rules (avoid spamming students):
-  * raise TripDelayed when delay >= DELAY_THRESHOLD_MIN and the trip isn't already in
-    the delayed state, or the delay has grown by another threshold since the last alert
-  * raise TripDelayResolved when a stop check-in shows the bus back under the threshold
-  * manual reports always raise
+  * alerts go out in steps (DELAY_ALERT_STEPS, default 5, 15, 30, 60 minutes late): TripDelayed
+    is raised when the delay reaches a step that hasn't been announced since the trip was last
+    on time. Once the last step has been announced the trip raises nothing more, however long
+    it stays late (a trip that never starts makes at most one alert per step, not one every
+    few minutes all day)
+  * steps above DELAY_STUDENT_ALERT_MAX_MIN reach the transport office only
+    (`notify_students: false` in the payload), except the first alert of a delay, which riders
+    always get
+  * raise TripDelayResolved when a stop check-in shows the bus back under the threshold; the
+    steps start again from the bottom if it falls behind later
+  * manual reports always raise, and always reach riders
 
 Public API: evaluate, current_delays, latest_report.
 """
 
 from datetime import date, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import events
@@ -80,12 +87,15 @@ async def evaluate(
     threshold = settings.delay_threshold_min
     last = await latest_report(session, trip.id)
     in_delayed_state = last is not None and last.source != DelaySource.RECOVERED
-    last_delay = last.delay_min if in_delayed_state else 0
+    last_delay = await _alerted_delay(session, trip.id) if in_delayed_state else 0
 
     if observed_delay >= threshold or source == DelaySource.MANUAL:
-        escalated = observed_delay - last_delay >= threshold
-        if in_delayed_state and not escalated and source != DelaySource.MANUAL:
-            return None
+        manual = source == DelaySource.MANUAL
+        step = alert_step(observed_delay)
+        if in_delayed_state and not manual and step <= alert_step(last_delay):
+            return None  # this step was already announced (or the last step has been reached)
+        # Riders always hear the first alert of a delay; later steps above the limit are office-only.
+        notify_students = manual or not in_delayed_state or step <= settings.delay_student_alert_max_min
         report = DelayReport(trip_id=trip.id, source=source, delay_min=observed_delay,
                              at_sequence=at_sequence, reason=reason, reported_by=reported_by)
         session.add(report)
@@ -98,6 +108,7 @@ async def evaluate(
              "service_date": trip.service_date, "delay_min": observed_delay,
              "previous_delay_min": last_delay, "source": source.value, "reason": reason,
              "at_sequence": at_sequence, "at_stop_name": at_stop, "reported_by": reported_by,
+             "alert_step": step, "notify_students": notify_students,
              "affected_stops": [s.model_dump() for s in affected_stops(trip, observed_delay)]},
             aggregate=("trip", trip.id), actor_id=reported_by,
         )
@@ -118,6 +129,25 @@ async def evaluate(
         )
         return report
     return None
+
+
+def alert_step(delay_min: int) -> int:
+    """The highest alert step this delay has reached (0 = under the first step)."""
+    return max((s for s in settings.delay_steps if delay_min >= s), default=0)
+
+
+async def _alerted_delay(session: AsyncSession, trip_id: int) -> int:
+    """The largest delay announced for the trip since it was last back on schedule."""
+    last_recovery = await session.scalar(
+        select(func.max(DelayReport.id)).where(DelayReport.trip_id == trip_id,
+                                               DelayReport.source == DelaySource.RECOVERED)
+    )
+    return await session.scalar(
+        select(func.coalesce(func.max(DelayReport.delay_min), 0)).where(
+            DelayReport.trip_id == trip_id, DelayReport.source != DelaySource.RECOVERED,
+            DelayReport.id > (last_recovery or 0),
+        )
+    )
 
 
 async def report_manual(

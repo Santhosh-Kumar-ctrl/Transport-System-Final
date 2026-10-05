@@ -3,6 +3,14 @@
 Newest entry at the top. Write one entry every time you finish a piece of work:
 what you built, *why* you chose that way, and what's still open.
 
+## 2026-10-04: Review fixes (Review.md)
+**Changed**
+- `recorded_at` must include a timezone (`…Z`); a naive time was a 500 (M1). The app already sends UTC.
+- Ingest uses the shared `trips.get_trip_for_update` lock, which manual taps now take too (B5).
+- `GET /trips/{id}/live` is limited to who may see the trip (L7). Route-topic subscriptions are
+  access-controlled (B3).
+- Retention job for `bus_positions` (L4): a bus sends ~720 fixes an hour.
+
 ## 2026-09-29: Live tracking from the driver's phone
 **Built**
 - New module that owns `bus_positions` (moved from trips, same table, plus `heading_deg`,

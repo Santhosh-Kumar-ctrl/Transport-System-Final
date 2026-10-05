@@ -1,5 +1,7 @@
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.core.schemas import PatchModel
+
 from app.modules.master_data.models import BusStatus
 
 HEX_COLOR = r"^#[0-9A-Fa-f]{6}$"
@@ -18,7 +20,9 @@ class BusIn(BaseModel):
         return v.strip().upper()
 
 
-class BusUpdate(BaseModel):
+class BusUpdate(PatchModel):
+    NOT_NULL = ("registration_no", "capacity", "status")
+
     registration_no: str | None = Field(default=None, min_length=2, max_length=20)
     capacity: int | None = Field(default=None, ge=1, le=120)
     model: str | None = None
@@ -50,7 +54,9 @@ class StopIn(BaseModel):
     longitude: float | None = Field(default=None, ge=-180, le=180)
 
 
-class StopUpdate(BaseModel):
+class StopUpdate(PatchModel):
+    NOT_NULL = ("name",)
+
     name: str | None = Field(default=None, min_length=1, max_length=120)
     landmark: str | None = None
     latitude: float | None = Field(default=None, ge=-90, le=90)
@@ -71,7 +77,9 @@ class RouteIn(BaseModel):
     is_active: bool = True
 
 
-class RouteUpdate(BaseModel):
+class RouteUpdate(PatchModel):
+    NOT_NULL = ("code", "name", "color", "is_active")
+
     code: str | None = Field(default=None, min_length=1, max_length=10)
     name: str | None = Field(default=None, min_length=1, max_length=120)
     color: str | None = Field(default=None, pattern=HEX_COLOR)

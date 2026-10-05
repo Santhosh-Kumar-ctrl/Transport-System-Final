@@ -22,6 +22,10 @@ import 'modules/master_data/screens/admin_fleet_screen.dart';
 import 'modules/master_data/screens/admin_network_screen.dart';
 import 'modules/master_data/screens/route_editor_screen.dart';
 import 'modules/notifications/screens/inbox_screen.dart';
+import 'modules/reports/screens/admin_issue_screen.dart';
+import 'modules/reports/screens/admin_issues_screen.dart';
+import 'modules/reports/screens/my_reports_screen.dart';
+import 'modules/reports/screens/report_form_screen.dart';
 import 'modules/tracking/screens/admin_live_map_screen.dart';
 import 'modules/trips/screens/admin_schedules_screen.dart';
 import 'modules/trips/screens/driver_home_screen.dart';
@@ -64,6 +68,17 @@ final routerProvider = Provider<GoRouter>((ref) {
           GoRoute(path: '/student', builder: (_, _) => const StudentHomeScreen()),
           GoRoute(path: '/student/alerts', builder: (_, _) => const InboxScreen()),
           GoRoute(path: '/student/trips', builder: (_, _) => const StudentAttendanceScreen()),
+          GoRoute(path: '/student/reports', builder: (_, _) => const MyReportsScreen()),
+          // Inside the shell, like the tabs: a page stacked over the shell made Flutter web throw
+          // a focus-traversal error when the form navigated back into it after sending.
+          GoRoute(
+            path: '/student/reports/new',
+            builder: (_, s) => ReportFormScreen(tripId: int.tryParse(s.uri.queryParameters['trip'] ?? '')),
+          ),
+          GoRoute(
+            path: '/student/reports/:id',
+            builder: (_, s) => StudentReportScreen(reportId: id(s)),
+          ),
         ],
       ),
       GoRoute(path: '/student/scan', builder: (_, _) => const StudentScanScreen()),
@@ -105,6 +120,11 @@ final routerProvider = Provider<GoRouter>((ref) {
           GoRoute(path: '/admin/allocation', builder: (_, _) => const AdminAllocationScreen()),
           GoRoute(path: '/admin/schedules', builder: (_, _) => const AdminSchedulesScreen()),
           GoRoute(path: '/admin/reports', builder: (_, _) => const AdminHistoryScreen()),
+          GoRoute(path: '/admin/issues', builder: (_, _) => const AdminIssuesScreen()),
+          GoRoute(
+            path: '/admin/issues/:id',
+            builder: (_, s) => AdminIssueScreen(reportId: id(s)),
+          ),
           GoRoute(path: '/admin/alerts', builder: (_, _) => const InboxScreen()),
         ],
       ),

@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
 from app.modules.trips.models import Direction, TripStatus
 from app.modules.trips.schemas import RouteBrief
@@ -14,7 +14,7 @@ class PositionIn(BaseModel):
     accuracy_m: float | None = Field(default=None, ge=0)
     # When the phone took the fix. Omitted = now. Buffered fixes sent after a network drop keep
     # their real time; anything in the future is treated as now.
-    recorded_at: datetime | None = None
+    recorded_at: AwareDatetime | None = None  # with a timezone, e.g. ...Z
 
 
 class PositionBatchIn(BaseModel):

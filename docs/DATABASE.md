@@ -1,8 +1,8 @@
 # Database design
 
-PostgreSQL 16 · 18 tables · Alembic head `9d3e5b7c1a2f`
-This document describes the schema **as it exists in the database** (generated from the live
-schema on 2026-09-24). If you change a model, update the relevant section here in the same PR.
+PostgreSQL 16 · 21 tables · Alembic head `bbb63096dc6b`
+This document describes the schema **as it exists in the database** (checked against the live
+schema on 2026-10-02). If you change a model, update the relevant section here in the same PR.
 
 ---
 
@@ -23,6 +23,7 @@ the owner's service (see `docs/CONTRIBUTING.md`, rule 1).
 | boarding | `boardings`, `attendance_records` |
 | delay_monitor | `delay_reports` |
 | notifications | `notifications` |
+| reports | `reports`, `report_messages`, `found_items` |
 | capacity, history, dashboard | *none: read-only modules* |
 
 ### Entity-relationship diagram
@@ -69,7 +70,20 @@ erDiagram
     boardings |o--o| attendance_records : ""
 
     trips ||--o{ delay_reports : ""
+    users |o--o{ delay_reports : "reported by"
     users ||--o{ notifications : "recipient"
+
+    users ||--o{ reports : "student"
+    trips |o--o{ reports : "about"
+    routes |o--o{ reports : ""
+    stops |o--o{ reports : "student's stop"
+    users |o--o{ reports : "closed by"
+    reports ||--o{ report_messages : "conversation"
+    users |o--o{ report_messages : "author"
+    found_items |o--o| reports : "matched"
+    trips |o--o{ found_items : "found on"
+    buses |o--o{ found_items : ""
+    users |o--o{ found_items : "logged by"
 ```
 
 `domain_events` has no foreign keys on purpose (see §4.1).
@@ -109,6 +123,11 @@ erDiagram
 | `attendance_records.status` | `present`, `absent`, `present_unallocated` | written when a trip ends |
 | `delay_reports.source` | `start`, `stop_arrival`, `overdue`, `not_started`, `manual`, `recovered` | how the delay was detected (Team B will add `gps`, `eta_model`) |
 | `notifications.severity` | `info`, `warning`, `critical` | |
+| `reports.kind` | `lateness`, `overcrowding`, `safety`, `lost_item`, `other` | chosen by the student |
+| `reports.status` | `open`, `replied`, `closed` | a student follow-up reopens a replied report |
+| `reports.severity` | `low`, `normal`, `high`, `critical` | set by the agent; null until analysed |
+| `reports.analysis_status` | `pending`, `done`, `failed` | |
+| `found_items.status` | `unclaimed`, `matched`, `returned` | |
 
 ---
 
@@ -133,7 +152,11 @@ for the history module, the audit trail, and the feed Team B's agent reads.
 | `occurred_at` | timestamptz | ✓ | `now()` | |
 
 Indexes: `ix_domain_events_type (type)`, `ix_domain_events_aggregate (aggregate_type, aggregate_id)`,
-`ix_domain_events_occurred_at (occurred_at)`.
+`ix_domain_events_occurred_at (occurred_at)`, and the expression indexes
+`ix_domain_events_payload_trip_id ((payload ->> 'trip_id'))` and
+`ix_domain_events_payload_route_id ((payload ->> 'route_id'))` for trip timelines and route history
+(query them through `events.payload_text(key)` so the key is inlined and the index matches).
+Kept for good: this is the history.
 
 *Why no FKs?* The log must survive deletions of the things it describes, and one column
 (`aggregate_id`) points at different tables depending on `aggregate_type`.
@@ -163,6 +186,7 @@ Example payload (`TripDelayed`):
 | `phone` | varchar(20) | | | |
 | `role` | varchar(32) | ✓ | | enum, indexed (`ix_users_role`) |
 | `is_active` | boolean | ✓ | `true` | deactivated users can't log in or refresh |
+| `token_version` | integer | ✓ | `0` | in every token as `ver`; bumped on password change or deactivation, which ends all sessions |
 | `created_at`, `updated_at` | timestamptz | ✓ | `now()` | |
 
 #### `student_profiles` (1:1 with a `student` user)
@@ -265,6 +289,10 @@ Constraints: `uq_route_stops_route_seq (route_id, sequence)` **DEFERRABLE INITIA
 Constraint: `uq_trips_schedule_date (schedule_id, service_date)`, so generating trips twice can't
 duplicate them.
 
+Partial unique indexes `uq_trips_one_running_per_driver (driver_id)` and
+`uq_trips_one_running_per_bus (bus_id)`, both `WHERE status = 'in_progress'`: a driver drives, and a
+bus runs, at most one trip at a time, even when two "start" requests race.
+
 Copies of route/bus/driver/direction are deliberate: a trip records what *actually* ran even if the
 schedule is later edited.
 
@@ -278,20 +306,12 @@ schedule is later edited.
 | `stop_name` | varchar(120) | ✓ | **snapshot** of the name when the trip was planned |
 | `sequence` | smallint | ✓ | visit order *within this trip* (drop trips are reversed) |
 | `scheduled_at` | timestamptz | ✓ | planned time |
-| `arrived_at` | timestamptz | | driver's check-in (null = not reached / skipped) |
+| `arrived_at` | timestamptz | | when the bus reached the stop: the driver's check-in or a GPS fix within 100 m (null = not reached / skipped) |
 | `delay_min` | smallint | | `arrived_at − scheduled_at`, rounded minutes (negative = early) |
 
 Constraint: `uq_trip_stop_events_seq (trip_id, sequence)`.
 
----|---|---|---|
-| `id` | integer | ✓ | PK |
-| `trip_id` | integer | | FK → `trips.id` CASCADE, indexed |
-| `bus_id` | integer | ✓ | FK → `buses.id` CASCADE |
-| `latitude`, `longitude` | double precision | ✓ | |
-| `speed_kmph` | double precision | | |
-| `recorded_at` | timestamptz | ✓ | indexed |
-
-Unused by P0 logic; exists so GPS/simulation work needs no schema change to start.
+GPS fixes for a trip are stored by the tracking module in `bus_positions` (§4.9).
 
 ---
 
@@ -388,7 +408,8 @@ table is also the de-duplication memory for alerts.
 | `read_at` | timestamptz | | | null = unread |
 | `created_at` | timestamptz | ✓ | `now()` | |
 
-Index: `ix_notifications_user_created (user_id, created_at)`, the inbox query.
+Index: `ix_notifications_user_created (user_id, created_at)`, the inbox query. Read notifications
+older than `NOTIFICATION_RETENTION_DAYS` (180) are deleted by the `notification-retention` job.
 
 ---
 
@@ -407,7 +428,8 @@ Index: `ix_notifications_user_created (user_id, created_at)`, the inbox query.
 | `recorded_at` | timestamptz | ✓ | when the phone took the fix (future → now); indexed |
 
 Index: `ix_bus_positions_trip_recorded (trip_id, recorded_at)` for the latest fix and a trip's track.
-About 720 rows per bus per running hour at one fix per 5 s; prune old trips when it matters.
+About 720 rows per bus per running hour at one fix per 5 s. Fixes older than
+`POSITION_RETENTION_DAYS` (90) are deleted by the `position-retention` job.
 
 #### `approach_alerts`: "bus is 2 km away" already announced
 | Column | Type | Null | Default | Notes |
@@ -423,6 +445,60 @@ Constraint: `uq_approach_alerts_trip_stop (trip_id, stop_id)`: each stop is anno
 
 ---
 
+### 4.10 reports
+
+#### `reports`: a problem a student reported, plus the agent's analysis
+| Column | Type | Null | Default | Notes |
+|---|---|---|---|---|
+| `id` | integer | ✓ | identity | PK |
+| `student_id` | integer | ✓ | | FK → `users.id` CASCADE, indexed. Kept even when `anonymous` (staff views hide it) |
+| `trip_id` | integer | | | FK → `trips.id` SET NULL: one of the student's trips from the last `REPORT_LOOKBACK_DAYS`; null = not about a trip |
+| `route_id` | integer | | | FK → `routes.id` SET NULL: the trip's route, else the student's allocated route |
+| `stop_id` | integer | | | FK → `stops.id` SET NULL: the student's allocated stop on that route |
+| `kind` | varchar(32) | ✓ | | enum |
+| `description` | varchar(1000) | ✓ | | the student's own words |
+| `anonymous` | boolean | ✓ | `false` | hide the name from staff |
+| `status` | varchar(32) | ✓ | `open` | enum |
+| `severity` | varchar(32) | | | enum, set by the agent (rules set the minimum) |
+| `analysis_status` | varchar(32) | ✓ | `pending` | enum, indexed (the retry sweeper looks for `pending`) |
+| `analysis` | jsonb | | | `{claims, findings[{check, verdict, detail, numbers}], match_candidates, summary, suggested_action, draft_reply, steps}` |
+| `analysed_by` | varchar(64) | | | `qwen3:4b`, `rules`, or `qwen3:4b+rules` when only one step used the model |
+| `analysed_at` | timestamptz | | | |
+| `matched_found_item_id` | integer | | | FK → `found_items.id` SET NULL |
+| `closed_at` | timestamptz | | | |
+| `closed_by` | integer | | | FK → `users.id` SET NULL |
+| `resolution_note` | varchar(255) | | | shown to the student |
+| `created_at`, `updated_at` | timestamptz | ✓ | `now()` | |
+
+Index: `ix_reports_status_created (status, created_at)` for the admin inbox.
+
+The analysis is stored as one jsonb document because it's written once per run and read whole by
+the admin screen; nothing queries inside it.
+
+#### `report_messages`: staff replies and student follow-ups
+| Column | Type | Null | Notes |
+|---|---|---|---|
+| `id` | integer | ✓ | PK |
+| `report_id` | integer | ✓ | FK → `reports.id` CASCADE, indexed |
+| `author_id` | integer | | FK → `users.id` SET NULL |
+| `from_staff` | boolean | ✓ | |
+| `body` | varchar(1000) | ✓ | |
+| `created_at` | timestamptz | ✓ | `now()` |
+
+#### `found_items`: lost and found
+| Column | Type | Null | Default | Notes |
+|---|---|---|---|---|
+| `id` | integer | ✓ | identity | PK |
+| `trip_id` | integer | | | FK → `trips.id` SET NULL (null = handed in at the office) |
+| `bus_id` | integer | | | FK → `buses.id` SET NULL |
+| `logged_by` | integer | | | FK → `users.id` SET NULL (driver or admin) |
+| `description` | varchar(300) | ✓ | | |
+| `status` | varchar(32) | ✓ | `unclaimed` | enum, indexed |
+| `embedding` | double precision[] | | | 768-number text embedding (`nomic-embed-text`) for matching; null when the model was off (matching then uses word overlap) |
+| `created_at`, `updated_at` | timestamptz | ✓ | `now()` | |
+
+---
+
 ## 5. Data flows and lifecycles
 
 ### 5.1 Rows written during one trip
@@ -434,12 +510,17 @@ Constraint: `uq_approach_alerts_trip_stop (trip_id, stop_id)`: each stop is anno
 | Driver's phone sends GPS fixes | N `bus_positions` · within 2 km of a stop: 1 `approach_alerts` + `BusApproaching` + notifications to its riders · within 100 m: same as ARRIVED below, with `source = gps` |
 | Driver taps ARRIVED (or GPS arrival) | stop `arrived_at`, `delay_min`; `trips.current_delay_min` · `StopArrived` · maybe `delay_reports` + `TripDelayed`/`TripDelayResolved` + notifications |
 | Driver ends | `trips.status = completed`, last stop reached · `TripEnded` · M `attendance_records` · `AttendanceFinalized` |
+| Driver never ends it (auto-close) | `trips.status = completed`, `ended_at` = last activity, unreached stops stay null · `TripEnded` with `auto_closed: true` and `actor_id` null · M `attendance_records` · `AttendanceFinalized` |
 
 ### 5.2 Trip status
 ```
-scheduled ──start──▶ in_progress ──end──▶ completed
-    └──────cancel───────┴──────cancel────▶ cancelled
+scheduled ──start──▶ in_progress ──end / auto-close──▶ completed
+    └──────cancel───────┴──────────cancel────────────▶ cancelled
 ```
+**Auto-close:** a trip still `in_progress` after its `service_date`, with no start or stop arrival
+for `STALE_TRIP_GRACE_HOURS` (default 3), is completed by the trips module. It runs every 15 minutes
+and before every trip start, so a trip the driver forgot to end never blocks their next one. The
+grace period keeps a late run that crosses midnight from being closed mid-route.
 
 ### 5.3 Allocation
 ```
@@ -463,8 +544,11 @@ scheduled ──start──▶ in_progress ──end──▶ completed
 | Valid enum values | CHECK constraints |
 | Route offsets non-decreasing, route ends at campus, ≥2 stops to schedule | service layer (master_data / trips) |
 | Seat capacity on allocation (409 unless `force`) | service layer (allocation) |
-| Driver/bus not already running a trip | service layer (trips.start) |
+| Driver/bus not already running a trip | service layer (trips.start; trips left running from an earlier day are auto-closed first, §5.2) |
+| Accounts are `student`, `driver` or `admin` only | CHECK `ck_users_user_role` |
 | QR token validity (30s, signed, bound to a running trip) | service layer (boarding): tokens are not stored |
+| A report is about one of the student's own recent trips | service layer (reports) |
+| Only an unclaimed found item can be matched, and only to a lost-item report | service layer (reports) |
 
 ---
 
@@ -480,6 +564,9 @@ scheduled ──start──▶ in_progress ──end──▶ completed
 | Inbox, unread count | `ix_notifications_user_created` |
 | Latest bus position, a trip's track | `ix_bus_positions_trip_recorded` |
 | Was this stop already announced? | `uq_approach_alerts_trip_stop` |
+| Admin issues inbox | `ix_reports_status_created` |
+| A student's reports | `ix_reports_student_id` |
+| Reports waiting for analysis | `ix_reports_analysis_status` |
 | Trip timeline, alerts today, capacity de-dup | `ix_domain_events_aggregate`, `ix_domain_events_type`, `ix_domain_events_occurred_at` |
 | Login | `ix_users_email` |
 
@@ -497,6 +584,8 @@ thousand rows.
 | `760c6592a8a4` | `buses.driver_id`: bus's regular driver (unique FK) |
 | `4f1c2d7a9b3e` | tracking: `bus_positions` gains `heading_deg`, `accuracy_m`, `(trip_id, recorded_at)` index; new `approach_alerts` |
 | `9d3e5b7c1a2f` | auth: `security` and `parent` roles removed (their accounts deleted); `student_profiles.parent_user_id` dropped |
+| `bbb63096dc6b` | reports: new `reports`, `report_messages`, `found_items` |
+| `c7a1e4f2b9d6` | review fixes: one running trip per driver/bus (partial unique indexes; extra running trips are completed first), `users.token_version`, `domain_events` payload expression indexes |
 
 Workflow:
 ```bash

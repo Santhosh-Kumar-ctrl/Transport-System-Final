@@ -7,7 +7,7 @@ from datetime import date, datetime, time, timedelta
 from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.events import DomainEvent
+from app.core.events import DomainEvent, payload_text
 from app.core.timeutil import local_tz
 from app.modules.auth import service as auth_service
 from app.modules.auth.models import StudentProfile, User
@@ -54,10 +54,10 @@ async def events(
     if trip_id is not None:
         stmt = stmt.where(or_(
             and_(DomainEvent.aggregate_type == "trip", DomainEvent.aggregate_id == trip_id),
-            DomainEvent.payload["trip_id"].astext == str(trip_id),
+            payload_text("trip_id") == str(trip_id),
         ))
     if route_id is not None:
-        stmt = stmt.where(DomainEvent.payload["route_id"].astext == str(route_id))
+        stmt = stmt.where(payload_text("route_id") == str(route_id))
     start, end = _day_bounds(date_from, date_to)
     if start:
         stmt = stmt.where(DomainEvent.occurred_at >= start)

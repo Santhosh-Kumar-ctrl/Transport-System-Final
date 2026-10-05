@@ -42,3 +42,24 @@ async def test_bus_crud_and_permissions(world):
     await world.post("/buses", {"registration_no": "KA01X1", "capacity": 30}, who=student, expect=403)
     # students can still read routes (they need the line diagram)
     await world.get("/routes", who=student)
+
+
+# ---------------- Review fixes: M1, L7 ----------------
+async def test_explicit_nulls_for_required_fields_are_rejected(world):
+    bus = await world.bus()
+    for body in ({"registration_no": None}, {"capacity": None}, {"status": None}):
+        await world.patch(f"/buses/{bus['id']}", body, expect=422)
+    stop = (await world.post("/stops", {"name": "Gate"}, expect=201)).json()
+    await world.patch(f"/stops/{stop['id']}", {"name": None}, expect=422)
+    route = await world.route()
+    await world.patch(f"/routes/{route['id']}", {"code": None}, expect=422)
+    # optional fields can still be cleared
+    assert (await world.patch(f"/buses/{bus['id']}", {"model": None})).json()["model"] is None
+    assert (await world.patch(f"/stops/{stop['id']}", {"landmark": None})).json()["landmark"] is None
+
+
+async def test_bus_details_are_for_staff(world):
+    bus = await world.bus()
+    student = await world.user(Role.STUDENT)
+    await world.get(f"/buses/{bus['id']}", who=student, expect=403)
+    await world.get(f"/buses/{bus['id']}", who=await world.user(Role.DRIVER))

@@ -1,4 +1,6 @@
+import asyncio
 from datetime import timedelta
+from functools import cache
 from typing import Any
 
 import bcrypt
@@ -26,6 +28,22 @@ def verify_password(password: str, password_hash: str) -> bool:
         return False
 
 
+# bcrypt takes ~250 ms of CPU at 12 rounds. Run it in a worker thread so a wave of logins
+# doesn't stall every other request on the event loop.
+async def hash_password_async(password: str) -> str:
+    return await asyncio.to_thread(hash_password, password)
+
+
+async def verify_password_async(password: str, password_hash: str) -> bool:
+    return await asyncio.to_thread(verify_password, password, password_hash)
+
+
+@cache
+def dummy_hash() -> str:
+    """Checked when the email is unknown, so a login takes as long whether or not the account exists."""
+    return hash_password("no-such-account")
+
+
 def sign(claims: dict[str, Any], ttl: timedelta) -> str:
     now = now_utc()
     payload = {**claims, "iat": int(now.timestamp()), "exp": int((now + ttl).timestamp())}
@@ -46,14 +64,14 @@ def verify(token: str, expected_type: str) -> dict[str, Any]:
     return payload
 
 
-def create_access_token(user_id: int, role: str, version: int = 0) -> str:
+# `ver` is the user's token_version: bumping it (password change, deactivation) ends every
+# session at its next refresh or WebSocket connect.
+def create_access_token(user_id: int, role: str, ver: int = 0) -> str:
     return sign(
-        {"typ": "access", "sub": str(user_id), "role": role, "ver": version},
+        {"typ": "access", "sub": str(user_id), "role": role, "ver": ver},
         timedelta(minutes=settings.access_token_minutes),
     )
 
 
-def create_refresh_token(user_id: int, version: int = 0) -> str:
-    import secrets
-    return sign({"typ": "refresh", "sub": str(user_id), "ver": version,
-                 "jti": secrets.token_urlsafe(32)}, timedelta(days=settings.refresh_token_days))
+def create_refresh_token(user_id: int, ver: int = 0) -> str:
+    return sign({"typ": "refresh", "sub": str(user_id), "ver": ver}, timedelta(days=settings.refresh_token_days))

@@ -31,7 +31,7 @@ from app.modules.trips.models import Trip, TripStatus
 from app.modules.trips.schemas import TripDetail
 
 ALERT_EVENTS = ["TripDelayed", "TripDelayResolved", "OverCapacity", "CapacityWarning",
-                "UnallocatedBoarding", "TripCancelled"]
+                "UnallocatedBoarding", "TripCancelled", "ScheduleSkipped"]
 
 
 async def _delays(session: AsyncSession, trips: list[Trip]) -> dict[int, int]:
@@ -54,6 +54,7 @@ async def admin(session: AsyncSession) -> AdminDashboard:
     details = {d.id: d for d in await trips_service.trip_details(session, trips)}
     delays = await _delays(session, trips)
     allocated = await alloc_service.count_active_by_route(session)
+    occupancy = await capacity_service.trip_occupancies(session, trips)
     counts = TripCounts()
     board = []
     for t in trips:
@@ -63,7 +64,7 @@ async def admin(session: AsyncSession) -> AdminDashboard:
         live = t.status in (TripStatus.IN_PROGRESS, TripStatus.SCHEDULED)
         if live and delay >= settings.delay_threshold_min:
             counts.delayed_now += 1
-        occ = await capacity_service.trip_occupancy(session, t)
+        occ = occupancy[t.id]
         ns = d.next_stop
         board.append(BoardRow(
             trip_id=t.id, route=d.route, direction=t.direction, bus_registration_no=d.bus.registration_no,
@@ -87,9 +88,10 @@ async def driver(session: AsyncSession, driver_id: int) -> DriverDashboard:
     trips = await trips_service.driver_trips(session, driver_id, today)
     details = await trips_service.trip_details(session, trips)
     delays = await _delays(session, trips)
+    occupancy = await capacity_service.trip_occupancies(session, trips)
     out = []
     for t, d in zip(trips, details):
-        occ = await capacity_service.trip_occupancy(session, t)
+        occ = occupancy[t.id]
         out.append(DriverTrip(trip=d, delay_min=delays[t.id], boarded=occ.boarded, capacity=occ.capacity,
                               occupancy_level=occ.level))
     active = next((x for x in out if x.trip.status == TripStatus.IN_PROGRESS), None)

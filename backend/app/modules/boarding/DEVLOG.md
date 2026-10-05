@@ -1,5 +1,12 @@
 # boarding: dev log
 
+## 2026-10-04: Review fixes (Review.md)
+**Built**
+- Attendance for running trips that get cancelled (M5). Measured before: 0 rows.
+- `reconcile_attendance` + `attendance-reconciler` job (H2): events are in-memory, so a restart
+  between a trip ending and its handler used to lose that trip's attendance for good.
+- The trip topic gets counts only; names go to the driver alone (B3). `boarded_counts()` batch helper (H3).
+
 ## 2026-09-24: Flutter screens
 **Built**
 - Driver QR screen: large high-contrast QR, auto-refresh 4s before expiry, countdown bar,

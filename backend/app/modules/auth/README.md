@@ -27,12 +27,12 @@ Not here: route/stop assignment (allocation), driver-to-bus assignment (trips sc
 ## API
 | Method | Path | Role | Purpose |
 |---|---|---|---|
-| POST | `/auth/login` | public | email + password → `{access_token, refresh_token, user}` |
-| POST | `/auth/refresh` | public | refresh token → new pair (refused if user deactivated) |
+| POST | `/auth/login` | public | email + password → `{access_token, refresh_token, user}`. 429 `rate_limited` after `LOGIN_ATTEMPTS_PER_MINUTE` (10) tries per address + email |
+| POST | `/auth/refresh` | public | refresh token → new pair (401 `inactive` if deactivated, `session_revoked` after a password change) |
 | GET | `/auth/me` | any | current user with profile |
 | GET | `/users?role=&q=&active=` | admin | list/search (q matches name, email, roll no) |
 | POST | `/users` | admin | create; `student` profile required for role=student, `driver` for role=driver |
-| GET/PATCH | `/users/{id}` | admin | view / edit / (de)activate / reset password |
+| GET/PATCH | `/users/{id}` | admin | view / edit / (de)activate / reset password. 409 `profile_taken` for a duplicate roll/licence no; 422 `last_admin` when deactivating the last active admin |
 
 Error codes: `bad_credentials`, `inactive`, `email_taken`, `roll_no_taken`, `license_taken`, `wrong_role`.
 
@@ -48,8 +48,17 @@ Error codes: `bad_credentials`, `inactive`, `email_taken`, `roll_no_taken`, `lic
 
 ## Security notes
 - Tokens carry `typ` (`access` / `refresh` / `board`), so one kind can't be used as another.
-- `Principal` is decoded from the token without a DB lookup. A deactivated user keeps access
-  until their access token expires (≤30 min), and refresh is refused immediately.
+- `Principal` is decoded from the token without a DB lookup. A deactivated user keeps REST access
+  until their access token expires (≤30 min); refresh and WebSocket connects are refused at once.
+- **Session revocation:** every token carries the user's `token_version` (`ver`). Changing the
+  password or deactivating the account bumps it, which ends every session at its next refresh,
+  and publishes `UserSessionsRevoked`, which closes the user's open sockets right away.
+- **Password hashing runs in a worker thread** (`security.hash_password_async` /
+  `verify_password_async`): bcrypt takes ~250 ms of CPU, which on the event loop would stall every
+  other request during a wave of logins. Unknown emails are checked against a dummy hash, so
+  login time doesn't reveal which accounts exist.
+- **Login rate limit** per IP + email (not per IP alone, so a campus behind one NAT address isn't
+  locked out).
 - `BCRYPT_ROUNDS` defaults to 12 (tests use 4 for speed).
 
 ## Frontend screens

@@ -22,7 +22,9 @@ flagged overdue by the watcher shows as late even before the driver checks in.
 ## Live updates
 `register()` forwards operational events as `{"type":"ops","data":{event, payload}}`:
 - to all **admin** sockets
-- to topic **`route:{id}`** (student apps subscribe to their route)
+- to topic **`route:{id}`** (student apps subscribe to their route), **without** `student_id`,
+  `student_name` or `allocated_route_id`, and never `UnallocatedBoarding`: every rider of the route
+  follows this topic
 - to the trip's **driver**
 
 Clients treat `ops` as a hint to re-fetch their dashboard.

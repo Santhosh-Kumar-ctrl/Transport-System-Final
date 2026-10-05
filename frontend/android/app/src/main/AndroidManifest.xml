@@ -10,13 +10,11 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
 
-    <!-- usesCleartextTraffic: the dev API runs on plain http://<laptop-ip>:8000.
-         Remove it (and serve the API over HTTPS) before a production release. -->
+    <!-- Cleartext (http://) is allowed in debug builds only: see src/debug/AndroidManifest.xml. -->
     <application
         android:label="Transit"
         android:name="${applicationName}"
-        android:icon="@mipmap/ic_launcher"
-        android:usesCleartextTraffic="true">
+        android:icon="@mipmap/ic_launcher">
         <activity
             android:name=".MainActivity"
             android:exported="true"

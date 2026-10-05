@@ -18,7 +18,7 @@ admin_only = require_roles(Role.ADMIN)
 async def events(type: list[str] | None = Query(None), aggregate_type: str | None = None,
                  aggregate_id: int | None = None, trip_id: int | None = None, route_id: int | None = None,
                  date_from: date | None = None, date_to: date | None = None,
-                 limit: int = Query(100, le=1000), offset: int = 0,
+                 limit: int = Query(100, ge=1, le=1000), offset: int = Query(0, ge=0),
                  _: Principal = Depends(admin_only), session: AsyncSession = Depends(get_session)):
     return await service.events(session, types=type, aggregate_type=aggregate_type, aggregate_id=aggregate_id,
                                 trip_id=trip_id, route_id=route_id, date_from=date_from, date_to=date_to,

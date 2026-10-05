@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import BigInteger, DateTime, Index, Integer, String, event as sa_event, func
+from sqlalchemy import BigInteger, DateTime, Index, Integer, String, event as sa_event, func, literal_column, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapped, Session, mapped_column
@@ -44,7 +44,20 @@ class DomainEvent(Base):
         DateTime(timezone=True), server_default=func.now(), index=True
     )
 
-    __table_args__ = (Index("ix_domain_events_aggregate", "aggregate_type", "aggregate_id"),)
+    __table_args__ = (
+        Index("ix_domain_events_aggregate", "aggregate_type", "aggregate_id"),
+        # Trip timelines and route history filter on these payload fields; see `payload_text`.
+        Index("ix_domain_events_payload_trip_id", text("(payload ->> 'trip_id')")),
+        Index("ix_domain_events_payload_route_id", text("(payload ->> 'route_id')")),
+    )
+
+
+def payload_text(key: str):
+    """`payload ->> '<key>'` with the key inlined, so it matches the expression indexes above
+    (a bound parameter for the key would keep Postgres from using them)."""
+    if not key.isidentifier():
+        raise ValueError(f"Bad payload key {key!r}")
+    return literal_column(f"domain_events.payload ->> '{key}'")
 
 
 @dataclass(frozen=True)

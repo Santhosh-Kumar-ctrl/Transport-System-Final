@@ -1,5 +1,18 @@
 # auth: dev log
 
+## 2026-10-04: Review fixes (Review.md)
+**Built**
+- bcrypt runs in a worker thread (B1), with a dummy check for unknown emails (L10). Login also
+  releases its DB connection before hashing, so a login burst doesn't starve the pool.
+- `users.token_version` + `ver` claim: a password change or deactivation revokes sessions (M2), and
+  `UserSessionsRevoked` closes open sockets. Auth registers the WebSocket session check.
+- Login rate limit, 10/min per IP + email (M3). The last active admin can't be deactivated (M6).
+- A duplicate roll/licence no on PATCH is a 409 `profile_taken`, not a 500 (M1). `limit`/`offset` bounds.
+
+**Decisions (and why)**
+- Revocation is checked on refresh and WebSocket connect, not on every REST call: that keeps
+  `Principal` DB-free, and the 30-minute access token bounds the gap.
+
 ## 2026-10-02: Security and parent roles removed
 **Changed**
 - `Role` is now `student`, `driver`, `admin`. Endpoints that allowed admin or security are admin-only,

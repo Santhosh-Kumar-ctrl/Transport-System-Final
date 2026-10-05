@@ -1,5 +1,11 @@
 # history: dev log
 
+## 2026-10-04: Review fixes (Review.md)
+**Changed**
+- Trip timelines and route filters use `events.payload_text(key)`, which matches the new expression
+  indexes on `payload->>'trip_id'` / `'route_id'` (L4); they used to scan the whole event log.
+- `limit` ≥ 1, `offset` ≥ 0 (M1).
+
 ## 2026-09-24: Flutter screens
 **Built**
 - Reports screen: day stepper, Trips tab (route, time, driver, boarded/present/missed, on-time plate)

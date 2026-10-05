@@ -13,9 +13,11 @@ admin_only = require_roles(Role.ADMIN)
 
 
 @router.get("/trips/{trip_id}", response_model=TripOccupancy)
-async def trip_occupancy(trip_id: int, _: Principal = Depends(current_principal),
+async def trip_occupancy(trip_id: int, p: Principal = Depends(current_principal),
                          session: AsyncSession = Depends(get_session)):
-    return await service.trip_occupancy(session, await trips_service.get_trip(session, trip_id))
+    trip = await trips_service.get_trip(session, trip_id)
+    await trips_service.ensure_can_view(session, p, trip)
+    return await service.trip_occupancy(session, trip)
 
 
 @router.get("/active", response_model=list[TripOccupancy])

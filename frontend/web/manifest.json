@@ -1,11 +1,11 @@
 {
-    "name": "transit",
-    "short_name": "transit",
+    "name": "Transit",
+    "short_name": "Transit",
     "start_url": ".",
     "display": "standalone",
-    "background_color": "#0175C2",
-    "theme_color": "#0175C2",
-    "description": "A new Flutter project.",
+    "background_color": "#EEF1F3",
+    "theme_color": "#123E63",
+    "description": "College bus transport: live buses, boarding and alerts for students, drivers and the transport office.",
     "orientation": "portrait-primary",
     "prefer_related_applications": false,
     "icons": [

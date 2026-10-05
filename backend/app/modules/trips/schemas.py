@@ -1,6 +1,8 @@
 from datetime import date, datetime, time
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator
+
+from app.core.schemas import PatchModel
 
 from app.modules.trips.models import Direction, TripStatus
 
@@ -22,7 +24,9 @@ class ScheduleIn(BaseModel):
         return sorted(set(v))
 
 
-class ScheduleUpdate(BaseModel):
+class ScheduleUpdate(PatchModel):
+    NOT_NULL = ("bus_id", "driver_id", "departure_time", "days_of_week", "is_active")
+
     bus_id: int | None = None
     driver_id: int | None = None
     departure_time: time | None = None
@@ -106,15 +110,16 @@ class GenerateOut(BaseModel):
     service_date: date
     created: int
     existing: int
+    skipped: int = 0  # schedules whose bus is in maintenance or retired
 
 
 class ArriveIn(BaseModel):
     # Simulation only (admin, ALLOW_SIMULATION=true): pretend the bus arrived at this time.
-    arrived_at: datetime | None = None
+    arrived_at: AwareDatetime | None = None
 
 
 class StartIn(BaseModel):
-    started_at: datetime | None = None  # simulation only, see ArriveIn
+    started_at: AwareDatetime | None = None  # simulation only, see ArriveIn
 
 
 class CancelIn(BaseModel):

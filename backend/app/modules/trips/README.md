@@ -33,6 +33,12 @@ scheduled ──start──▶ in_progress ──end──▶ completed
   `STALE_TRIP_GRACE_HOURS` (3 h), is completed at its last activity. Unreached stops stay unreached.
   Runs from the background job and before every start, so a forgotten End never blocks the next run.
 
+## Concurrency
+Every state change of a trip (start, arrive, end, cancel, and tracking's GPS ingest) first locks
+the trip row (`get_trip_for_update`, `SELECT … FOR UPDATE`), so a double tap or a tap racing a GPS
+arrival runs once. Partial unique indexes allow at most one `in_progress` trip per driver and per
+bus, whatever the timing (409 `already_running`).
+
 ## Data model
 | Table | Key columns |
 |---|---|
@@ -46,12 +52,12 @@ scheduled ──start──▶ in_progress ──end──▶ completed
 | Method | Path | Role | Purpose |
 |---|---|---|---|
 | GET / POST | `/schedules` | admin | list / create (`driver_id` optional: defaults to the bus's assigned driver, else 422 `driver_required`) |
-| PATCH | `/schedules/{id}` | admin | change bus, driver, time, days, active |
-| POST | `/trips/generate` `{service_date?}` | admin | create the day's trips (also runs automatically) |
+| PATCH | `/schedules/{id}` | admin | change bus, driver, time, days, active. Time/bus/driver changes reach the schedule's not-yet-started trips (today onwards); deactivating only stops future generation |
+| POST | `/trips/generate` `{service_date?}` | admin | create the day's trips (also runs automatically); past dates → 422 `past_date`. Returns `{created, existing, skipped}` |
 | GET | `/trips?service_date&status&route_id&driver_id` | admin | trips with route/bus/driver/stops |
 | GET | `/trips/mine?service_date` | driver | today's trips for the driver |
-| GET | `/trips/{id}` | any | trip detail incl. `next_stop` |
-| POST | `/trips/{id}/start` | driver (own), admin | start |
+| GET | `/trips/{id}` | admin; the trip's driver; students allocated to its route (others: 404) | trip detail incl. `next_stop` |
+| POST | `/trips/{id}/start` | driver (own), admin | start (today's trips only: 422 `wrong_day`) |
 | POST | `/trips/{id}/stops/{sequence}/arrive` | driver (own), admin | check in at a stop |
 | POST | `/trips/{id}/end` | driver (own), admin | finish |
 | POST | `/trips/{id}/cancel` `{reason}` | admin | cancel |
@@ -66,6 +72,7 @@ Error codes: `bad_trip_state`, `bus_unavailable`, `already_running`, `already_ar
 | Emits | Payload highlights |
 |---|---|
 | `TripsGenerated` | `service_date`, `created` |
+| `ScheduleSkipped` | once per schedule and day when its bus isn't `active` (no trip is generated): `schedule_id, route_id, bus_id, registration_no, bus_status, direction, departure_time, service_date` |
 | `TripStarted` | `trip_id, route_id, bus_id, driver_id, direction, scheduled_departure, started_at, delay_min` |
 | `StopArrived` | `sequence, stop_id, stop_name, scheduled_at, arrived_at, delay_min, is_last, source` (`manual` \| `gps`) |
 | `TripEnded` | `ended_at, final_delay_min, skipped_stops`, `auto_closed` (only when closed automatically; `actor_id` is null) |

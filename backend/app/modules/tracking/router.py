@@ -26,7 +26,7 @@ async def report_positions(trip_id: int, body: PositionBatchIn,
 @router.get("/trips/{trip_id}/live", response_model=LiveTrip)
 async def trip_live(trip_id: int, p: Principal = Depends(current_principal),
                     session: AsyncSession = Depends(get_session)):
-    await authorize_trip(session, p, trip_id)
+    await trips_service.ensure_can_view(session, p, await trips_service.get_trip(session, trip_id))
     return await service.live_trip(session, trip_id)
 
 

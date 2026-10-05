@@ -95,6 +95,7 @@ class StudentShell extends StatelessWidget {
     NavItem('My line', '/student', Icons.linear_scale),
     NavItem('Alerts', '/student/alerts', Icons.notifications_none, showUnread: true),
     NavItem('Trips', '/student/trips', Icons.event_note_outlined),
+    NavItem('Reports', '/student/reports', Icons.report_outlined),
   ];
 
   @override
@@ -143,6 +144,7 @@ class AdminShell extends ConsumerWidget {
     NavItem('Allocation', '/admin/allocation', Icons.group_add_outlined),
     NavItem('Schedules', '/admin/schedules', Icons.schedule),
     NavItem('Reports', '/admin/reports', Icons.fact_check_outlined),
+    NavItem('Issues', '/admin/issues', Icons.report_outlined),
     NavItem('Alerts', '/admin/alerts', Icons.notifications_none, showUnread: true),
   ];
 

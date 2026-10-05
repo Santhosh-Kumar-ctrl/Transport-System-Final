@@ -8,6 +8,7 @@ from app.core.deps import Principal, current_principal, require_roles
 from app.core.roles import Role
 from app.modules.delay_monitor import service
 from app.modules.delay_monitor.schemas import DelayReportOut, ReportDelayIn
+from app.modules.trips import service as trips_service
 
 router = APIRouter(tags=["delays"])
 
@@ -22,8 +23,9 @@ async def report_delay(trip_id: int, body: ReportDelayIn,
 
 
 @router.get("/trips/{trip_id}/delays", response_model=list[DelayReportOut])
-async def trip_delays(trip_id: int, _: Principal = Depends(current_principal),
+async def trip_delays(trip_id: int, p: Principal = Depends(current_principal),
                       session: AsyncSession = Depends(get_session)):
+    await trips_service.ensure_can_view(session, p, await trips_service.get_trip(session, trip_id))
     return await service.list_reports(session, trip_id=trip_id)
 
 

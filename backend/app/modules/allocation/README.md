@@ -20,6 +20,10 @@
   Routes with no schedule yet succeed with a "capacity unknown" warning.
 - Assigning a student to the allocation they already have is a no-op (`changed: false`, no event).
 
+## Live channel policy
+Registers the WebSocket `route:{id}` topic policy: admins any route, students only the route they
+are allocated to, drivers routes they have a trip on today.
+
 ## Data model
 | Table | Key columns |
 |---|---|

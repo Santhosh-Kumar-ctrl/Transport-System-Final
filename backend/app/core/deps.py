@@ -14,10 +14,16 @@ _bearer = HTTPBearer(auto_error=False)
 
 @dataclass(frozen=True)
 class Principal:
-    """The authenticated caller; request authorization also checks current DB state."""
+    """The authenticated caller, decoded from the access token (no DB hit).
+
+    A deactivated user (or one whose password changed) keeps REST access until their access
+    token expires (ACCESS_TOKEN_MINUTES); refresh and WebSocket connects check the account.
+    """
 
     id: int
     role: Role
+    ver: int = 0  # the user's token_version when the token was issued
+    expires_at: int | None = None  # unix time the access token expires
 
     def is_(self, *roles: Role) -> bool:
         return self.role in roles
@@ -25,21 +31,8 @@ class Principal:
 
 def principal_from_token(token: str) -> Principal:
     claims = verify(token, "access")
-    try:
-        return Principal(id=int(claims["sub"]), role=Role(claims["role"]))
-    except (KeyError, ValueError, TypeError) as exc:
-        raise Unauthorized("Invalid token", code="token_invalid") from exc
-
-
-async def authenticated_principal(token: str, session: AsyncSession) -> Principal:
-    from app.modules.auth.models import User
-    claims = verify(token, "access")
-    p = principal_from_token(token)
-    user = await session.get(User, p.id, populate_existing=True)
-    if (user is None or not user.is_active or user.role != p.role
-            or claims.get("ver") != user.token_version):
-        raise Unauthorized("Session revoked", code="token_invalid")
-    return p
+    return Principal(id=int(claims["sub"]), role=Role(claims["role"]),
+                     ver=int(claims.get("ver", 0)), expires_at=claims.get("exp"))
 
 
 async def current_principal(

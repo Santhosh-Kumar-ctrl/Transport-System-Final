@@ -5,6 +5,7 @@ import 'package:transit/core/format.dart';
 import 'package:transit/design/design.dart';
 import 'package:transit/modules/dashboard/data/dashboard_api.dart';
 import 'package:transit/modules/dashboard/screens/student_home_screen.dart';
+import 'package:transit/modules/reports/data/reports_api.dart';
 import 'package:transit/modules/tracking/data/tracking_api.dart';
 import 'package:transit/modules/tracking/widgets/live_map.dart';
 import 'package:transit/modules/trips/data/trip_models.dart';
@@ -51,22 +52,36 @@ void main() {
 
   test('API errors keep the backend message and code', () {
     final req = RequestOptions(path: '/boarding/check-in');
-    final e = ApiException.fromDio(DioException(
-      requestOptions: req,
-      response: Response(requestOptions: req, statusCode: 422,
-          data: {'detail': 'This QR code has expired.', 'code': 'qr_expired'}),
-    ));
+    final e = ApiException.fromDio(
+      DioException(
+        requestOptions: req,
+        response: Response(
+          requestOptions: req,
+          statusCode: 422,
+          data: {'detail': 'This QR code has expired.', 'code': 'qr_expired'},
+        ),
+      ),
+    );
     expect(e.code, 'qr_expired');
     expect(e.message, 'This QR code has expired.');
 
-    final v = ApiException.fromDio(DioException(
-      requestOptions: req,
-      response: Response(requestOptions: req, statusCode: 422, data: {
-        'detail': [
-          {'loc': ['body', 'email'], 'msg': 'Value error, student profile is required for role=student'}
-        ]
-      }),
-    ));
+    final v = ApiException.fromDio(
+      DioException(
+        requestOptions: req,
+        response: Response(
+          requestOptions: req,
+          statusCode: 422,
+          data: {
+            'detail': [
+              {
+                'loc': ['body', 'email'],
+                'msg': 'Value error, student profile is required for role=student',
+              },
+            ],
+          },
+        ),
+      ),
+    );
     expect(v.message, 'student profile is required for role=student');
 
     final offline = ApiException.fromDio(DioException(requestOptions: req));
@@ -105,5 +120,27 @@ void main() {
     expect(distanceLabel(430), '450 m');
     expect(distanceLabel(1840), '1.8 km');
     expect(distanceLabel(12400), '12 km');
+  });
+
+  test('reports map the agent analysis for admins', () {
+    final r = Report.fromJson(reportJson());
+    expect(r.kind, ReportKind.lostItem);
+    expect(r.kind.api, 'lost_item');
+    expect(r.studentName, 'Priya R');
+    expect(r.tripLabel, contains('morning pickup'));
+    expect(r.messages.single.fromStaff, isTrue);
+    expect(r.analysis!.findings.map((f) => f.verdictLabel), ['Confirmed', 'Partly']);
+    expect(r.analysis!.findings.last.checkLabel, 'Found items');
+    expect(r.analysis!.candidates.single.foundItemId, 3);
+    expect(r.analysedAt, isNotNull);
+  });
+
+  test("a student's view of a report has no analysis and may be anonymous", () {
+    final r = Report.fromJson(reportJson(anonymous: true, analysed: false));
+    expect(r.studentName, isNull);
+    expect(r.analysis, isNull);
+    expect(r.analysisStatus, 'pending');
+    expect(ReportKind.parse('lost_item'), ReportKind.lostItem);
+    expect(ReportKind.parse('safety'), ReportKind.safety);
   });
 }

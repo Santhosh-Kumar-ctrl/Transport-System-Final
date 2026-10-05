@@ -1,24 +1,21 @@
 """Auth & users. Public API for other modules: get_user, get_users, briefs, admin_ids,
 ensure_role."""
 
-import hashlib
-from datetime import timedelta
-
-from sqlalchemy import delete, or_, select
-from sqlalchemy.exc import IntegrityError
-from app.core.config import settings
-from app.core.timeutil import now_utc
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import events
+from app.core.db import flush_or_conflict
+from app.core.deps import Principal
 from app.core.errors import Conflict, InvalidState, NotFound, Unauthorized
 from app.core.roles import Role
 from app.core.security import (
     create_access_token,
     create_refresh_token,
-    hash_password,
+    dummy_hash,
+    hash_password_async,
     verify,
-    verify_password,
+    verify_password_async,
 )
 from app.modules.auth.models import DriverProfile, RefreshSession, StudentProfile, User
 from app.modules.auth.schemas import TokenPair, UserBrief, UserCreate, UserOut, UserUpdate
@@ -38,17 +35,18 @@ def _tokens(session: AsyncSession, user: User) -> TokenPair:
                                expires_at=now_utc() + timedelta(days=settings.refresh_token_days)))
     return TokenPair(
         access_token=create_access_token(user.id, user.role.value, user.token_version),
-        refresh_token=refresh_token,
+        refresh_token=create_refresh_token(user.id, user.token_version),
         user=UserOut.model_validate(user),
     )
 
 
 async def login(session: AsyncSession, email: str, password: str) -> TokenPair:
-    user = await session.scalar(select(User).where(User.email == email.lower()).with_for_update())
-    if user is None:
-        verify_password(password, _DUMMY_HASH)
-        raise Unauthorized("Incorrect email or password", code="bad_credentials")
-    if not verify_password(password, user.password_hash):
+    user = await session.scalar(select(User).where(User.email == email.lower()))
+    # End the read transaction first: the pooled DB connection goes back while bcrypt runs, so a
+    # wave of logins doesn't starve other requests of connections.
+    await session.commit()
+    ok = await verify_password_async(password, user.password_hash if user else dummy_hash())
+    if user is None or not ok:
         raise Unauthorized("Incorrect email or password", code="bad_credentials")
     if not user.is_active:
         raise Unauthorized("Account is deactivated", code="inactive")
@@ -64,14 +62,15 @@ async def refresh(session: AsyncSession, refresh_token: str) -> TokenPair:
     user = await session.scalar(select(User).where(User.id == user_id).with_for_update())
     if user is None or not user.is_active or claims.get("ver") != user.token_version:
         raise Unauthorized("Account unavailable", code="inactive")
-    consumed = await session.execute(
-        delete(RefreshSession).where(RefreshSession.token_digest == _digest(refresh_token),
-                                     RefreshSession.user_id == user.id,
-                                     RefreshSession.expires_at > now_utc()).returning(RefreshSession.token_digest)
-    )
-    if consumed.scalar_one_or_none() is None:
-        raise Unauthorized("Refresh token already used or revoked", code="token_invalid")
-    return _tokens(session, user)
+    if int(claims.get("ver", 0)) != user.token_version:
+        raise Unauthorized("This session has ended. Sign in again.", code="session_revoked")
+    return _tokens(user)
+
+
+async def session_valid(session: AsyncSession, p: Principal) -> bool:
+    """The account behind an access token is still active and the token wasn't revoked."""
+    user = await session.get(User, p.id)
+    return user is not None and user.is_active and user.token_version == p.ver
 
 
 async def get_user(session: AsyncSession, user_id: int) -> User:
@@ -170,7 +169,7 @@ async def create_user(session: AsyncSession, data: UserCreate, *, actor_id: int 
 
     user = User(
         email=email,
-        password_hash=hash_password(data.password),
+        password_hash=await hash_password_async(data.password),
         full_name=data.full_name,
         phone=data.phone,
         role=data.role,
@@ -193,20 +192,15 @@ async def create_user(session: AsyncSession, data: UserCreate, *, actor_id: int 
 async def update_user(
     session: AsyncSession, user_id: int, data: UserUpdate, *, actor_id: int | None
 ) -> User:
-    user = await session.scalar(select(User).where(User.id == user_id).with_for_update())
-    if user is None:
-        raise NotFound(f"User {user_id} not found")
-    if data.is_active is False and actor_id == user.id:
-        raise InvalidState("You cannot deactivate your own account", code="self_deactivate")
-    if data.password is not None or (data.is_active is not None and data.is_active != user.is_active):
-        user.token_version += 1
-        await session.execute(delete(RefreshSession).where(RefreshSession.user_id == user.id))
+    user = await get_user(session, user_id)
+    revoke = False
     if data.full_name is not None:
         user.full_name = data.full_name
     if data.phone is not None:
         user.phone = data.phone
     if data.password is not None:
-        user.password_hash = hash_password(data.password)
+        user.password_hash = await hash_password_async(data.password)
+        revoke = True
     if data.student is not None:
         if user.role != Role.STUDENT:
             raise InvalidState("Not a student", code="wrong_role")
@@ -218,11 +212,25 @@ async def update_user(
         for k, v in data.driver.model_dump().items():
             setattr(user.driver, k, v)
     if data.is_active is not None and data.is_active != user.is_active:
+        if not data.is_active and user.role == Role.ADMIN and await _active_admin_count(session) <= 1:
+            raise InvalidState("Can't deactivate the last active admin", code="last_admin")
         user.is_active = data.is_active
+        revoke = revoke or not data.is_active
         await events.publish(
             session, "UserActivated" if data.is_active else "UserDeactivated",
             {"user_id": user.id, "role": user.role.value},
             aggregate=("user", user.id), actor_id=actor_id,
         )
-    await session.flush()
+    if revoke:
+        user.token_version += 1
+        await events.publish(session, "UserSessionsRevoked", {"user_id": user.id},
+                             aggregate=("user", user.id), actor_id=actor_id)
+    await flush_or_conflict(session, "That roll no or licence no is already used by another user",
+                            code="profile_taken")
     return user
+
+
+async def _active_admin_count(session: AsyncSession) -> int:
+    return await session.scalar(
+        select(func.count()).select_from(User).where(User.role == Role.ADMIN, User.is_active.is_(True))
+    )

@@ -148,6 +148,16 @@ class _MyLine extends ConsumerWidget {
           ),
           for (final t in others) _OtherTripRow(trip: t),
         ],
+        Padding(
+          padding: const EdgeInsets.fromLTRB(Space.gutter, Space.xl, Space.gutter, 0),
+          child: SignButton(
+            label: 'Report a problem',
+            icon: Icons.report_outlined,
+            kind: SignButtonKind.quiet,
+            expand: true,
+            onPressed: () => context.go('/student/reports/new'),
+          ),
+        ),
         const SizedBox(height: Space.xxl),
       ],
     );

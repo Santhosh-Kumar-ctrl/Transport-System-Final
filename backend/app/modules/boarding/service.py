@@ -4,13 +4,14 @@ Flow: the driver's app shows a trip QR that rotates every QR_TTL_SECONDS; the
 student scans it and POSTs the token. A photo of the QR forwarded to someone not on
 the bus stops working within seconds.
 
-Public API for other modules: boarded_count, boarded_student_ids, finalize_attendance.
+Public API for other modules: boarded_count(s), boarded_student_ids, finalize_attendance,
+reconcile_attendance.
 """
 
 import secrets
-from datetime import timedelta
+from datetime import date, timedelta
 
-from sqlalchemy import func, select
+from sqlalchemy import exists, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -18,9 +19,10 @@ from app.core import events
 from app.core.config import settings
 from app.core.deps import Principal
 from app.core.errors import Conflict, Forbidden, InvalidState, Unauthorized
+from app.core.events import DomainEvent
 from app.core.roles import Role
 from app.core.security import sign, verify
-from app.core.timeutil import now_utc
+from app.core.timeutil import now_utc, today_local
 from app.modules.allocation import service as alloc_service
 from app.modules.auth import service as auth_service
 from app.modules.auth.models import User
@@ -43,6 +45,16 @@ def _ensure_operator(trip: Trip, p: Principal) -> None:
 
 async def boarded_count(session: AsyncSession, trip_id: int) -> int:
     return await session.scalar(select(func.count()).select_from(Boarding).where(Boarding.trip_id == trip_id))
+
+
+async def boarded_counts(session: AsyncSession, trip_ids: list[int]) -> dict[int, int]:
+    """boarded_count for several trips in one query (trips nobody boarded are left out)."""
+    if not trip_ids:
+        return {}
+    rows = await session.execute(
+        select(Boarding.trip_id, func.count()).where(Boarding.trip_id.in_(trip_ids)).group_by(Boarding.trip_id)
+    )
+    return {trip_id: n for trip_id, n in rows.all()}
 
 
 async def boarded_student_ids(session: AsyncSession, trip_id: int) -> set[int]:
@@ -191,7 +203,8 @@ async def roster(session: AsyncSession, trip_id: int, p: Principal) -> Roster:
 async def finalize_attendance(session: AsyncSession, trip_id: int) -> dict | None:
     """Write attendance for a finished trip. Idempotent: returns None if already done."""
     trip = await trips_service.get_trip(session, trip_id)
-    if await session.scalar(select(AttendanceRecord.id).where(AttendanceRecord.trip_id == trip.id).limit(1)):
+    written = await session.scalar(select(AttendanceRecord.id).where(AttendanceRecord.trip_id == trip.id).limit(1))
+    if written or await session.scalar(select(_finalized(trip.id))):
         return None
     boardings = {b.student_id: b for b in await session.scalars(select(Boarding).where(Boarding.trip_id == trip.id))}
     allocated = [a for a in await alloc_service.active_on_route(session, trip.route_id)
@@ -219,6 +232,34 @@ async def finalize_attendance(session: AsyncSession, trip_id: int) -> dict | Non
                "present_unallocated": counts[AttendanceStatus.PRESENT_UNALLOCATED]}
     await events.publish(session, "AttendanceFinalized", summary, aggregate=("trip", trip.id))
     return summary
+
+
+def _finalized(trip_id):
+    """The AttendanceFinalized event exists for the trip (also covers trips with no riders)."""
+    return exists().where(DomainEvent.type == "AttendanceFinalized", DomainEvent.aggregate_type == "trip",
+                          DomainEvent.aggregate_id == trip_id)
+
+
+async def reconcile_attendance(session: AsyncSession, *, days: int = 3) -> list[int]:
+    """Finalise attendance for recent finished trips whose TripEnded/TripCancelled handler never ran
+    (the server restarted, or the handler failed). Returns the trip ids it finalised."""
+    since: date = today_local() - timedelta(days=days)
+    settled = now_utc() - timedelta(minutes=2)  # leave just-ended trips to their own handler
+    trip_ids = list(await session.scalars(
+        select(Trip.id).where(
+            Trip.service_date >= since, Trip.ended_at < settled,
+            or_(Trip.status == TripStatus.COMPLETED,
+                (Trip.status == TripStatus.CANCELLED) & Trip.started_at.is_not(None)),
+            ~exists().where(AttendanceRecord.trip_id == Trip.id),
+            ~exists().where(DomainEvent.type == "AttendanceFinalized", DomainEvent.aggregate_type == "trip",
+                            DomainEvent.aggregate_id == Trip.id),
+        )
+    ))
+    done = []
+    for trip_id in trip_ids:
+        if await finalize_attendance(session, trip_id) is not None:
+            done.append(trip_id)
+    return done
 
 
 async def student_attendance(session: AsyncSession, student_id: int, limit: int = 60) -> list[AttendanceOut]:

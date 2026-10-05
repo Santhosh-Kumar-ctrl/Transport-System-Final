@@ -1,5 +1,11 @@
 # master_data: dev log
 
+## 2026-10-04: Review fixes (Review.md)
+**Changed**
+- PATCH bodies reject `null` for required fields with a 422 (`core.schemas.PatchModel`); before, a
+  null registration no was a 500 and a null capacity a misleading 409 (M1).
+- `GET /buses/{id}` is staff only (L7). `_flush_or_conflict` moved to `core.db.flush_or_conflict`.
+
 ## 2026-09-24: Admin assigns a driver to each bus
 **Built**
 - `buses.driver_id` (unique FK to users) + migration `master_data: bus assigned driver`.

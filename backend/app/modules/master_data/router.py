@@ -40,7 +40,7 @@ async def create_bus(body: BusIn, p: Principal = Depends(admin_only),
 
 
 @router.get("/buses/{bus_id}", response_model=BusOut)
-async def get_bus(bus_id: int, _: Principal = Depends(current_principal),
+async def get_bus(bus_id: int, _: Principal = Depends(require_roles(Role.ADMIN, Role.DRIVER)),
                   session: AsyncSession = Depends(get_session)):
     return await service.get_bus(session, bus_id)
 

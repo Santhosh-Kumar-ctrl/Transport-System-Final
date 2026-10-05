@@ -72,6 +72,27 @@ LAST = ["S", "R", "K", "M", "P", "V", "N", "T", "B", "G"]
 DEPTS = ["CSE", "ECE", "MECH", "CIVIL", "IT", "EEE"]
 
 
+async def check_schema() -> None:
+    """Stop before touching anything if the database is behind the code's migrations (after a
+    `git pull` that added one), instead of failing halfway with a missing column."""
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    root = Path(__file__).resolve().parents[1]
+    cfg = Config(str(root / "alembic.ini"))
+    cfg.set_main_option("script_location", str(root / "alembic"))
+    head = ScriptDirectory.from_config(cfg).get_current_head()
+    async with engine.connect() as conn:
+        try:
+            current = await conn.scalar(text("SELECT version_num FROM alembic_version"))
+        except Exception:  # noqa: BLE001 - no alembic_version table: never migrated
+            current = None
+    if current != head:
+        await engine.dispose()
+        sys.exit(f"The database is at migration {current or '(none)'}, but the code needs {head}.\n"
+                 "Run `alembic upgrade head` (in backend/) first, then seed again.")
+
+
 async def reset() -> None:
     tables = ", ".join(t.name for t in db_models.metadata.sorted_tables)
     async with engine.begin() as conn:
@@ -155,6 +176,7 @@ async def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--reset", action="store_true", help="truncate all tables first")
     args = parser.parse_args()
+    await check_schema()
     if args.reset:
         await reset()
     await seed()

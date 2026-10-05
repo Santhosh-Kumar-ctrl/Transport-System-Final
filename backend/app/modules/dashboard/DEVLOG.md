@@ -1,5 +1,13 @@
 # dashboard: dev log
 
+## 2026-10-04: Review fixes (Review.md)
+**Changed**
+- Route-topic `ops` messages carry no student identities (B3). Measured before: a student following
+  a route received the name of every rider who boarded.
+- Admin and driver dashboards use batched occupancy queries (H3); `ScheduleSkipped` is added to the
+  live events and the admin alerts list.
+- The admin board app ignores `position` messages and debounces refetches (2 s).
+
 ## 2026-09-24: Flutter screens
 **Built**
 - Admin live departure board (dark board, LED clock, counts, departure rows, trip detail dialog with

@@ -12,6 +12,7 @@ from app.modules.boarding import models as _boarding  # noqa: F401
 from app.modules.delay_monitor import models as _delay  # noqa: F401
 from app.modules.master_data import models as _master  # noqa: F401
 from app.modules.notifications import models as _notifications  # noqa: F401
+from app.modules.reports import models as _reports  # noqa: F401
 from app.modules.tracking import models as _tracking  # noqa: F401
 from app.modules.trips import models as _trips  # noqa: F401
 

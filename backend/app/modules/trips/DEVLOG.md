@@ -1,5 +1,21 @@
 # trips: dev log
 
+## 2026-10-04: Review fixes (Review.md)
+**Built**
+- Row locks on every trip state change + partial unique indexes on running trips (B5). Measured
+  before: a double tap started a trip twice, and one driver could run two trips at once.
+- `start` only for today's trips (M4); `generate` refuses past dates (L8).
+- Schedule edits (time, bus, driver) reach not-yet-started trips, shifting stop times (M8).
+- Schedules whose bus is in maintenance/retired get no trip and one `ScheduleSkipped` a day (B2):
+  they used to sit "not started" all day and feed the delay watcher.
+- `can_view_trip` / `ensure_can_view` for trip reads (L7) and the WebSocket `trip` topic policy (B3).
+- Simulation timestamps must carry a timezone (M1); `route_seat_capacities()` batch helper (H3).
+
+**Decisions (and why)**
+- Deactivating a schedule does **not** cancel a trip already generated: generating today's trip and
+  then deactivating the schedule is how one-off runs are made (the simulators rely on it). Cancel
+  the trip explicitly if it shouldn't run.
+
 ## 2026-10-02: Auto-close trips left running
 **Built**
 - `close_stale_trips()`: completes trips still `in_progress` after their service day once they've

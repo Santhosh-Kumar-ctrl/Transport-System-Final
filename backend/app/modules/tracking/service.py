@@ -16,7 +16,7 @@ Public API for other modules: ingest, latest_positions, live_trip(s), broadcast.
 from dataclasses import dataclass, field
 from datetime import timedelta
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import events
@@ -48,7 +48,7 @@ def _ensure_reporter(trip: Trip, p: Principal) -> None:
         return
     if p.role == Role.ADMIN and settings.allow_simulation:
         return  # replaying a bus in demos
-    raise Forbidden("Only the trip's driver can report its position")
+    raise Forbidden("Only the trip's driver can report its position (admins only with ALLOW_SIMULATION=true)")
 
 
 def _last_reached(trip: Trip) -> int:
@@ -82,9 +82,8 @@ def _arrival_candidate(
 
 
 async def ingest(session: AsyncSession, trip_id: int, fixes: list[PositionIn], p: Principal) -> IngestResult:
-    # Serialise ingest per trip so two batches can't both check the bus in at the same stop.
-    await session.execute(select(Trip.id).where(Trip.id == trip_id).with_for_update())
-    trip = await trips_service.get_trip(session, trip_id)
+    # Serialise ingest per trip (and with taps on Arrived) so two can't check the bus in at the same stop.
+    trip = await trips_service.get_trip_for_update(session, trip_id)
     _ensure_reporter(trip, p)
     if trip.status != TripStatus.IN_PROGRESS:
         raise InvalidState("Trip is not in progress", code="bad_trip_state")
@@ -139,6 +138,14 @@ async def broadcast(position: BusPosition, trip: Trip) -> None:
     data = {**PositionOut.model_validate(position).model_dump(), "route_id": trip.route_id}
     await hub.send_to_topic(f"route:{trip.route_id}", "position", data)
     await hub.send_to_role(Role.ADMIN, "position", data)
+
+
+async def delete_old_positions(session: AsyncSession, older_than_days: int) -> int:
+    """Housekeeping: GPS fixes are kept this long (a bus reports ~720 an hour). Trip history,
+    stop arrivals and the domain event log are not affected."""
+    cutoff = now_utc() - timedelta(days=older_than_days)
+    result = await session.execute(delete(BusPosition).where(BusPosition.recorded_at < cutoff))
+    return result.rowcount or 0
 
 
 # ---------------- Queries ----------------

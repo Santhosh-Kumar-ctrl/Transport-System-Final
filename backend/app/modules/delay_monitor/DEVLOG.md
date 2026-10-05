@@ -1,5 +1,16 @@
 # delay_monitor: dev log
 
+## 2026-10-04: Review fixes (Review.md)
+**Changed**
+- **Stepped alerts replace "every threshold"** (B2). Measured before: a trip that never started sent
+  every rider and admin an alert every 5 minutes (24 each in 2 h, ~150 a day). Now 5 → 15 → 30 for
+  riders and the driver, one office-only alert at 60, then silence. Manual reports always go out.
+
+**Decisions (and why)**
+- The first alert of a delay always reaches riders, even if it is already past 30 min (a bus first
+  seen 70 min late): they must hear it once.
+- `previous_delay_min` is now the largest delay announced since recovery, not the last row's.
+
 ## 2026-09-24: Flutter screens
 **Built**
 - "Running late" bottom sheet for drivers: pick minutes and a reason (or type one), then *Tell riders*.

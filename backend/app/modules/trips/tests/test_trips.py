@@ -3,6 +3,7 @@ from datetime import datetime, time, timedelta
 from sqlalchemy import update
 
 from app.core.db import SessionLocal
+from app.core.events import drain as events_drain
 from app.core.roles import Role
 from app.core.timeutil import local_tz, now_utc
 from app.modules.trips.models import Trip, TripStopEvent
@@ -152,3 +153,125 @@ async def test_late_run_crossing_midnight_is_not_closed(world):
     async with SessionLocal() as s:
         assert await close_stale_trips(s) == []
     assert (await world.get(f"/trips/{tid}")).json()["status"] == "in_progress"
+
+
+# ---------------- Review fixes: B5, M4, M8, L7, L8, B2 (skipped schedules) ----------------
+async def _scheduled_trip(world, *, direction: str = "pickup", departure: time | None = None):
+    route, bus, driver = await world.route(), await world.bus(), await world.user(Role.DRIVER)
+    sched = await world.schedule(route, bus, driver, direction=direction, departure=departure)
+    return {"route": route, "bus": bus, "driver": driver, "schedule": sched, "trip": await world.todays_trip(sched)}
+
+
+async def _count(world, event_type: str) -> int:
+    return len((await world.get("/history/events", type=event_type)).json())
+
+
+async def test_double_tap_on_start_starts_once(world):
+    import asyncio
+
+    w = await _scheduled_trip(world)
+    url, h = f"/trips/{w['trip']['id']}/start", w["driver"]["headers"]
+    r1, r2 = await asyncio.gather(world.c.post(url, headers=h), world.c.post(url, headers=h))
+    await events_drain()
+    assert sorted([r1.status_code, r2.status_code]) == [200, 422]
+    assert await _count(world, "TripStarted") == 1
+
+
+async def test_driver_cannot_run_two_trips_at_once_even_concurrently(world):
+    import asyncio
+
+    route, bus1, bus2, driver = await world.route(), await world.bus(), await world.bus(), await world.user(Role.DRIVER)
+    t1 = await world.todays_trip(await world.schedule(route, bus1, driver))
+    t2 = await world.todays_trip(await world.schedule(route, bus2, driver, direction="drop"))
+    h = driver["headers"]
+    r1, r2 = await asyncio.gather(world.c.post(f"/trips/{t1['id']}/start", headers=h),
+                                  world.c.post(f"/trips/{t2['id']}/start", headers=h))
+    await events_drain()
+    assert sorted([r1.status_code, r2.status_code]) == [200, 409]
+    assert {r1.json().get("code"), r2.json().get("code")} >= {"already_running"}
+    assert len((await world.get("/trips", status="in_progress")).json()) == 1
+
+
+async def test_double_tap_on_arrived_arrives_once(world):
+    import asyncio
+
+    w = await world.running_trip()
+    url, h = f"/trips/{w['trip']['id']}/stops/2/arrive", w["driver"]["headers"]
+    r1, r2 = await asyncio.gather(world.c.post(url, headers=h), world.c.post(url, headers=h))
+    await events_drain()
+    assert sorted([r1.status_code, r2.status_code]) == [200, 409]
+    assert await _count(world, "StopArrived") == 1
+
+
+async def test_only_todays_trips_can_be_started(world):
+    route, bus, driver = await world.route(), await world.bus(), await world.user(Role.DRIVER)
+    await world.schedule(route, bus, driver)
+    tomorrow = (now_utc().astimezone(local_tz()) + timedelta(days=1)).date()
+    await world.post("/trips/generate", {"service_date": tomorrow.isoformat()})
+    trip = (await world.get("/trips", service_date=tomorrow.isoformat())).json()[0]
+    r = await world.post(f"/trips/{trip['id']}/start", who=driver, expect=422)
+    assert r.json()["code"] == "wrong_day"
+
+
+async def test_trips_cant_be_generated_for_past_days(world):
+    yesterday = (now_utc().astimezone(local_tz()) - timedelta(days=1)).date()
+    r = await world.post("/trips/generate", {"service_date": yesterday.isoformat()}, expect=422)
+    assert r.json()["code"] == "past_date"
+
+
+async def test_schedule_edits_reach_todays_trip(world):
+    w = await _scheduled_trip(world, departure=time(23, 40))
+    before = w["trip"]
+    driver2, bus2 = await world.user(Role.DRIVER), await world.bus()
+    await world.patch(f"/schedules/{w['schedule']['id']}",
+                      {"departure_time": "23:50:00", "driver_id": driver2["id"], "bus_id": bus2["id"]})
+    after = (await world.get(f"/trips/{before['id']}")).json()
+    shift = timedelta(minutes=10)
+    assert datetime.fromisoformat(after["scheduled_departure"]) == datetime.fromisoformat(before["scheduled_departure"]) + shift
+    assert [datetime.fromisoformat(s["scheduled_at"]) for s in after["stops"]] == \
+           [datetime.fromisoformat(s["scheduled_at"]) + shift for s in before["stops"]]
+    assert after["driver"]["id"] == driver2["id"] and after["bus"]["id"] == bus2["id"]
+
+
+async def test_deactivating_a_schedule_keeps_the_trip_already_made(world):
+    """The one-off run pattern: generate today's trip, then deactivate the schedule."""
+    w = await _scheduled_trip(world)
+    await world.patch(f"/schedules/{w['schedule']['id']}", {"is_active": False})
+    assert (await world.get(f"/trips/{w['trip']['id']}")).json()["status"] == "scheduled"
+    await world.post(f"/trips/{w['trip']['id']}/start", who=w["driver"])
+
+
+async def test_schedule_required_fields_cant_be_nulled(world):
+    w = await _scheduled_trip(world)
+    for body in ({"bus_id": None}, {"driver_id": None}, {"departure_time": None}, {"is_active": None}):
+        await world.patch(f"/schedules/{w['schedule']['id']}", body, expect=422)
+
+
+async def test_schedule_with_bus_in_maintenance_is_skipped_and_reported_once(world):
+    route, bus, driver = await world.route(), await world.bus(), await world.user(Role.DRIVER)
+    await world.patch(f"/buses/{bus['id']}", {"status": "maintenance"})
+    await world.schedule(route, bus, driver)
+    out = (await world.post("/trips/generate", {})).json()
+    assert out["created"] == 0 and out["skipped"] == 1
+    await world.post("/trips/generate", {})  # the generator runs every 15 minutes
+    skipped = [n for n in await world.inbox(world.admin) if n["type"] == "ScheduleSkipped"]
+    assert len(skipped) == 1 and "maintenance" in skipped[0]["body"]
+    await world.patch(f"/buses/{bus['id']}", {"status": "active"})
+    assert (await world.post("/trips/generate", {})).json()["created"] == 1
+
+
+async def test_trip_details_are_for_its_riders_driver_and_admins(world):
+    w = await _scheduled_trip(world)
+    url = f"/trips/{w['trip']['id']}"
+    outsider = await world.user(Role.STUDENT)
+    await world.get(url, who=outsider, expect=404)
+    await world.get(url, who=await world.user(Role.DRIVER), expect=404)
+    rider = await world.user(Role.STUDENT)
+    await world.allocate(rider, w["route"], 0)
+    await world.get(url, who=rider)
+    await world.get(url, who=w["driver"])
+
+
+async def test_simulated_times_need_a_timezone(world):
+    w = await world.running_trip()
+    await world.post(f"/trips/{w['trip']['id']}/stops/2/arrive", {"arrived_at": "2026-10-04T10:00:00"}, expect=422)

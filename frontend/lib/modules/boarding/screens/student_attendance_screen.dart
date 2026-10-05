@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 
 import '../../../core/format.dart';
 import '../../../design/design.dart';
@@ -73,7 +74,21 @@ class _Row extends StatelessWidget {
               ],
             ),
           ),
-          StatusPlate(label, tone: tone),
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              StatusPlate(label, tone: tone),
+              TextButton(
+                style: TextButton.styleFrom(
+                  padding: EdgeInsets.zero,
+                  minimumSize: const Size(0, 32),
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
+                onPressed: () => context.go('/student/reports/new?trip=${a.tripId}'),
+                child: const Text('Report a problem'),
+              ),
+            ],
+          ),
         ],
       ),
     );

@@ -45,20 +45,20 @@ async def test_late_arrival_notifies_only_downstream_waiting_students(world):
 
 
 async def test_small_delays_and_repeats_dont_spam(world):
-    w = await world.running_trip(n_stops=5)
+    w = await world.running_trip(n_stops=6)
     trip = w["trip"]
     stops = trip["stops"]
     await world.post(f"/trips/{trip['id']}/stops/2/arrive", {"arrived_at": world.at(stops[1]["scheduled_at"], 3)})
     assert (await world.get(f"/trips/{trip['id']}/delays")).json() == []  # under threshold
 
     await world.post(f"/trips/{trip['id']}/stops/3/arrive", {"arrived_at": world.at(stops[2]["scheduled_at"], 7)})
-    await world.post(f"/trips/{trip['id']}/stops/4/arrive", {"arrived_at": world.at(stops[3]["scheduled_at"], 9)})
+    await world.post(f"/trips/{trip['id']}/stops/4/arrive", {"arrived_at": world.at(stops[3]["scheduled_at"], 13)})
     reports = (await world.get(f"/trips/{trip['id']}/delays")).json()
-    assert [r["delay_min"] for r in reports] == [7]  # +2 more isn't a new alert
+    assert [r["delay_min"] for r in reports] == [7]  # still the 5-minute step: no new alert
 
-    await world.post(f"/trips/{trip['id']}/stops/5/arrive", {"arrived_at": world.at(stops[4]["scheduled_at"], 13)})
+    await world.post(f"/trips/{trip['id']}/stops/5/arrive", {"arrived_at": world.at(stops[4]["scheduled_at"], 16)})
     reports = (await world.get(f"/trips/{trip['id']}/delays")).json()
-    assert [r["delay_min"] for r in reports] == [13, 7]  # grew by >= threshold -> escalation
+    assert [r["delay_min"] for r in reports] == [16, 7]  # reached the 15-minute step -> escalation
 
 
 async def test_recovery_sends_back_on_schedule(world):
@@ -113,3 +113,62 @@ async def test_watcher_flags_trip_not_started(world):
     report = (await world.get(f"/trips/{trip['id']}/delays")).json()[0]
     assert report["source"] == "not_started"
     assert "TripDelayed" in _types(await world.inbox(student))
+
+
+# ---------------- Review fixes: B2 (stepped alerts) ----------------
+async def test_a_trip_that_never_starts_is_announced_in_steps_then_stops(world, monkeypatch):
+    from sqlalchemy import func, select
+
+    from app.core import events
+    from app.core.db import SessionLocal
+    from app.modules.delay_monitor import service as delay_service
+    from app.modules.notifications.models import Notification
+
+    route, bus, driver = await world.route(), await world.bus(), await world.user(Role.DRIVER)
+    student = await world.user(Role.STUDENT)
+    await world.allocate(student, route, 1)
+    start = (now_utc() - timedelta(minutes=1)).astimezone(local_tz())
+    if start.date() != now_utc().astimezone(local_tz()).date():
+        pytest.skip("near midnight")
+    sched = await world.schedule(route, bus, driver, departure=start.time().replace(second=0, microsecond=0))
+    await world.todays_trip(sched)
+    t0 = now_utc()
+    for minute in range(0, 181):  # the watcher runs every minute for three hours; nobody starts the trip
+        monkeypatch.setattr(delay_service, "now_utc", lambda m=minute: t0 + timedelta(minutes=m))
+        async with SessionLocal() as s:
+            await delay_service.watch_once(s)
+            await s.commit()
+        await events.drain()
+
+    async def delayed_alerts(user_id: int) -> int:
+        async with SessionLocal() as s:
+            return await s.scalar(select(func.count()).select_from(Notification).where(
+                Notification.user_id == user_id, Notification.type == "TripDelayed"))
+
+    assert await delayed_alerts(student["id"]) == 3  # +5, +15, +30
+    assert await delayed_alerts(driver["id"]) == 3
+    assert await delayed_alerts(world.admin["id"]) == 4  # and one office-only alert at +60
+    last = (await world.inbox(world.admin))[0]
+    assert "No further alerts" in last["body"]
+
+
+async def test_manual_reports_still_reach_riders_after_the_last_step(world):
+    w = await world.running_trip(n_stops=4)
+    trip, rider = w["trip"], await world.user(Role.STUDENT)
+    await world.allocate(rider, w["route"], 2)
+    stops = trip["stops"]
+    await world.post(f"/trips/{trip['id']}/stops/2/arrive", {"arrived_at": world.at(stops[1]["scheduled_at"], 70)})
+    before = len([n for n in await world.inbox(rider) if n["type"] == "TripDelayed"])
+    await world.post(f"/trips/{trip['id']}/delay", {"delay_min": 75, "reason": "Road closed"}, who=w["driver"],
+                     expect=201)
+    after = [n for n in await world.inbox(rider) if n["type"] == "TripDelayed"]
+    assert len(after) == before + 1 and "Road closed" in after[0]["body"]
+
+
+async def test_first_alert_of_a_delay_always_reaches_riders(world):
+    w = await world.running_trip(n_stops=4)
+    trip, rider = w["trip"], await world.user(Role.STUDENT)
+    await world.allocate(rider, w["route"], 2)
+    stop2 = trip["stops"][1]
+    await world.post(f"/trips/{trip['id']}/stops/2/arrive", {"arrived_at": world.at(stop2["scheduled_at"], 70)})
+    assert [n["type"] for n in await world.inbox(rider)][:1] == ["TripDelayed"]

@@ -1,7 +1,8 @@
 # Running and testing live tracking
 
 How to run the platform locally and see live bus tracking working: the moving bus on the map,
-stops marked arrived automatically, and the "bus is 2 km away" alert.
+stops marked arrived automatically, and the "bus is 2 km away" alert. Section 5 covers student
+reports and the AI agent that checks them.
 
 You'll need three terminals: the API, the app and a bus simulator. Postgres must be running first.
 To check everything works without the app, you only need the API and the simulator: see
@@ -49,7 +50,7 @@ step 2 running and seeded data from step 1.
 ```powershell
 cd backend
 .venv\Scripts\activate
-python -m scripts.simulate_bus
+python -m scripts.simulate_bus --speedup 5 --interval 2 --end
 ```
 This signs in as driver1, starts a route 14 pickup trip departing now, and drives it along the
 stops at 10x speed, sending a GPS position every 2 seconds. As it goes:
@@ -69,6 +70,10 @@ Tidel Park -> Perungudi (3.2 km)
   12.96110,80.24130     0 km/h  ARRIVED Perungudi
 ```
 Without `--end` the trip stays running at the last stop, so you can look around in the app.
+
+> `scripts.demo_scenario` and `scripts.simulate_reports` send made-up arrival times as the admin,
+> which needs `ALLOW_SIMULATION=true` in `backend/.env` (it's in `.env.example`; production keeps it
+> off). Without it they stop with `403 ... simulation_off`.
 End it from the driver app, or run the simulator with `--end` next time.
 
 ### What you should see as student4
@@ -141,10 +146,62 @@ Run `python -m scripts.simulate_bus --help` for the full list.
   boardings, attendance and notifications. To start clean, run
   `python -m scripts.seed --reset` (this wipes the dev database).
 
-## 5. Automated tests
+## 5. Student reports and the AI agent
+Students report problems (late or skipped stop, overcrowding, safety, lost item). An agent checks
+each report against the trip records, sets its urgency and drafts a reply. Admins review it on
+the **Issues** screen. The agent runs on a **local model through Ollama**, so nothing leaves your
+laptop.
+
+### One-time setup
+1. Install Ollama from https://ollama.com and start it (it runs in the system tray).
+2. Download the two models (about 3 GB):
+   ```powershell
+   ollama pull qwen3:4b
+   ollama pull nomic-embed-text
+   ```
+3. Add the settings from `.env.example` (the `REPORT_AI` and `OLLAMA_*` lines) to `backend/.env`,
+   or leave them out to use the defaults.
+
+Without Ollama everything still works: reports are checked with keyword rules and templates, and
+the admin screen says "Written by the rule-based checker". Set `REPORT_AI=rules` to force that.
+
+### Check it end to end (no app needed)
+With the API running (step 2):
 ```powershell
 cd backend
-.venv\Scripts\python -m pytest -q                        # all 70 backend tests
+.venv\Scripts\activate
+python -m scripts.simulate_reports
+```
+This starts a one-off route 14 trip with known facts:
+- the bus reaches stop 2 twelve minutes late;
+- it skips stop 3;
+- GPS shows speeds up to 88 km/h;
+- the driver logs a water bottle as found.
+
+Then six students file reports and the script checks each verdict. It passed if it ends with:
+```
+✓ All 6 reports got the expected verdict.
+```
+Each report takes about 6 seconds with the model, except the first, which can take up to a minute
+while the model loads. The script refuses to run if driver1 already has a trip running.
+
+### Try it in the browser
+1. As `student4@college.edu`, go to **Reports**, then **New** (or **Report a problem** on My line,
+   or a trip on **Trips**). Pick a kind and a trip, describe the problem, and send it.
+2. As `admin@college.edu`, open **Issues** in the side menu. Within a few seconds the report shows
+   the agent's summary. Open it to see:
+   - each finding, marked Confirmed, Partly, Not supported or No data;
+   - the suggested action;
+   - the draft reply, which you can edit and send.
+3. Back as student4, the reply arrives as an alert and in the report's thread.
+
+Drivers log found items with **Found item** on the run screen. Lost-item reports then list
+likely matches; **Match** tells the student to collect the item.
+
+## 6. Automated tests
+```powershell
+cd backend
+.venv\Scripts\python -m pytest -q                        # all 148 backend tests
 .venv\Scripts\python -m pytest app/modules/tracking -q   # just the tracking tests
 
 cd ..\frontend
@@ -154,7 +211,7 @@ flutter test
 The backend tests use the `transit_test` database, which `docker compose` creates, so they never
 touch your dev data.
 
-## 6. Real GPS on a phone (optional)
+## 7. Real GPS on a phone (optional)
 Browsers only share location on HTTPS or `localhost`, so the driver needs the Android app.
 
 1. Put the phone on the same Wi-Fi as your laptop.
@@ -180,10 +237,13 @@ your location.
 | Problem | Fix |
 |---|---|
 | `docker compose up` fails to connect | Start Docker Desktop and wait until it says it's running |
+| Seed says "The database is at migration …", or anything fails with `column … does not exist` | The code has a newer migration than your database (after a `git pull`): run `alembic upgrade head` in `backend/`, then restart the API |
 | Map says "No map for this route yet" | The stops have no coordinates: re-seed with `--reset` (see step 1) |
 | Simulator exits with "Can't sign in" | The API isn't running, or the database isn't seeded: run `python -m scripts.seed` |
 | Simulator says "This route's stops have no coordinates" | The database was seeded before live tracking: re-seed with `--reset` (see step 1) |
 | Simulator exits with `409 ... already_running` | Another trip for this driver or bus is still running today: log in as that driver and end it from the run screen, or as admin call `POST /trips/{id}/end` from http://localhost:8000/docs |
 | Student sees no alert | Check you're logged in as a student on the simulated route, waiting at a stop after the first one, and not boarded |
 | Driver strip shows **Blocked** or **Location off** | Tap the button on the strip to open the phone's settings |
+| Reports stay "Checking the bus records…" | The model is loading (up to a minute the first time). If it never finishes, check Ollama is running: http://localhost:11434 should say "Ollama is running" |
+| Admin screen says "rule-based checker" | Ollama wasn't reachable, or `REPORT_AI=rules`. Start Ollama and press **Check again** on the report |
 | Map tiles don't load | The public OpenStreetMap server may be rate-limiting; set `--dart-define=TILE_URL=...` to another provider |

@@ -46,6 +46,6 @@ async def roster(trip_id: int, p: Principal = Depends(operator), session: AsyncS
 
 
 @router.get("/me/attendance", response_model=list[AttendanceOut])
-async def my_attendance(limit: int = Query(60, le=365), p: Principal = Depends(require_roles(Role.STUDENT)),
+async def my_attendance(limit: int = Query(60, ge=1, le=365), p: Principal = Depends(require_roles(Role.STUDENT)),
                         session: AsyncSession = Depends(get_session)):
     return await service.student_attendance(session, p.id, limit)

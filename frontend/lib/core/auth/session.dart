@@ -1,7 +1,9 @@
 import 'dart:convert';
 
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../api/api_client.dart';
@@ -65,33 +67,77 @@ class Session {
 
 const _storeKey = 'transit.session';
 
-/// Holds the signed-in session and persists it (shared_preferences / localStorage on web).
+/// Where the signed-in session is kept between launches.
+abstract interface class SessionStore {
+  Future<String?> read();
+  Future<void> write(String? value); // null clears it
+}
+
+/// Web: browser storage (localStorage). There is no safer place a web app can keep a token.
+class PrefsSessionStore implements SessionStore {
+  const PrefsSessionStore();
+
+  @override
+  Future<String?> read() async => (await SharedPreferences.getInstance()).getString(_storeKey);
+
+  @override
+  Future<void> write(String? value) async {
+    final prefs = await SharedPreferences.getInstance();
+    value == null ? await prefs.remove(_storeKey) : await prefs.setString(_storeKey, value);
+  }
+}
+
+/// Phones: the platform's encrypted keystore. A session saved by an older version in plain
+/// preferences is moved over on first read.
+class SecureSessionStore implements SessionStore {
+  const SecureSessionStore();
+
+  static const _secure = FlutterSecureStorage();
+
+  @override
+  Future<String?> read() async {
+    final value = await _secure.read(key: _storeKey);
+    if (value != null) return value;
+    final legacy = await const PrefsSessionStore().read();
+    if (legacy != null) {
+      await _secure.write(key: _storeKey, value: legacy);
+      await const PrefsSessionStore().write(null);
+    }
+    return legacy;
+  }
+
+  @override
+  Future<void> write(String? value) async =>
+      value == null ? _secure.delete(key: _storeKey) : _secure.write(key: _storeKey, value: value);
+}
+
+/// Holds the signed-in session and persists it ([SessionController.store]).
 class SessionController extends Notifier<Session?> {
   /// Set by main() from storage before the first frame.
   static Session? restored;
 
-  final _bare = Dio(BaseOptions(baseUrl: AppConfig.apiBase, connectTimeout: const Duration(seconds: 8)));
+  /// Encrypted storage on phones, browser storage on web. Tests swap in a memory store.
+  static SessionStore store = kIsWeb ? const PrefsSessionStore() : const SecureSessionStore();
+
+  /// The HTTP client for login and refresh (no auth interceptor). Tests swap in a fake.
+  static Dio Function() authClient = () =>
+      Dio(BaseOptions(baseUrl: AppConfig.apiBase, connectTimeout: const Duration(seconds: 8)));
+
+  late final Dio _bare = authClient();
 
   @override
   Session? build() => restored;
 
   static Future<void> restore() async {
     try {
-      final raw = (await SharedPreferences.getInstance()).getString(_storeKey);
+      final raw = await store.read();
       if (raw != null) restored = Session.fromTokenPair(jsonDecode(raw) as Map<String, dynamic>);
     } catch (_) {
       restored = null; // corrupted or old format: sign in again
     }
   }
 
-  Future<void> _save(Session? s) async {
-    final prefs = await SharedPreferences.getInstance();
-    if (s == null) {
-      await prefs.remove(_storeKey);
-    } else {
-      await prefs.setString(_storeKey, jsonEncode(s.toJson()));
-    }
-  }
+  Future<void> _save(Session? s) => store.write(s == null ? null : jsonEncode(s.toJson()));
 
   Future<void> login(String email, String password) async {
     try {
@@ -104,7 +150,11 @@ class SessionController extends Notifier<Session?> {
     }
   }
 
-  /// Returns the new access token, or null if the session can't be renewed.
+  /// Returns the new access token, or null if the session can't be renewed right now.
+  ///
+  /// Only a 401 from the server (session expired, revoked or account deactivated) signs the user
+  /// out. A timeout or a server error keeps the session: a driver on patchy mobile data stays
+  /// signed in (and keeps sharing the bus's location) and the next call simply tries again.
   Future<String?> refresh() async {
     final current = state;
     if (current == null) return null;
@@ -114,8 +164,8 @@ class SessionController extends Notifier<Session?> {
       await _save(s);
       state = s;
       return s.accessToken;
-    } on DioException {
-      await logout();
+    } on DioException catch (e) {
+      if (e.response?.statusCode == 401) await logout();
       return null;
     }
   }

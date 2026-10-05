@@ -1,5 +1,12 @@
 # allocation: dev log
 
+## 2026-10-04: Review fixes (Review.md)
+**Built**
+- Consumes `UserDeactivated`: a deactivated student's allocation ends (`end_reason=deactivated`), so
+  their seat is free again (M6). Measured before: the route stayed "full".
+- `assign` locks the route row before counting seats, so two admins can't both take the last one (L3).
+- Owns the `route:{id}` WebSocket topic policy (B3).
+
 ## 2026-09-24: Flutter screens
 **Built**
 - Allocation screen: pick a route, see its stops as a line diagram with the students at each stop,

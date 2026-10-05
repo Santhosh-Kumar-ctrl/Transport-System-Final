@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/realtime/realtime.dart';
 import '../../../design/design.dart';
+import '../../reports/data/reports_api.dart';
 import '../data/notifications_api.dart';
 
 /// Wrap a role shell with this: live notifications refresh the inbox/badge
@@ -18,6 +19,10 @@ class LiveNotificationListener extends ConsumerWidget {
       ref.invalidate(unreadCountProvider);
       ref.invalidate(inboxProvider);
       final n = AppNotification.fromJson(m.data);
+      if (n.type.startsWith('Report') || n.type == 'LostItemMatched') {
+        ref.invalidate(myReportsProvider);
+        ref.invalidate(reportProvider);
+      }
       final edge = switch (n.severity) {
         'critical' => TransitColors.late,
         'warning' => TransitColors.caution,

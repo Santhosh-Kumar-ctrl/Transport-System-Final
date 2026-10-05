@@ -30,3 +30,13 @@ frontend/ios/Pods/
 .DS_Store
 Thumbs.db
 .vscode/
+
+# Production secrets and Android release signing
+deploy/.env
+frontend/android/key.properties
+*.jks
+*.keystore
+
+#MDs
+UI.md
+Review.md

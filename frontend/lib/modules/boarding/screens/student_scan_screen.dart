@@ -10,6 +10,21 @@ import '../../../design/design.dart';
 import '../../dashboard/data/dashboard_api.dart';
 import '../data/boarding_api.dart';
 
+/// Plain-language guidance per backend error code.
+(String, String) explainScanError(ApiException e) => switch (e.code) {
+  'qr_expired' => (
+    'That code has just changed',
+    "The driver's code refreshes every 30 seconds. Scan the code on their screen again.",
+  ),
+  'qr_invalid' => ("That isn't a boarding code", "Scan the QR code shown on the driver's phone."),
+  'already_boarded' => ("You're already on board", 'Your boarding on this bus is recorded. Nothing else to do.'),
+  'bad_trip_state' => (
+    "This bus isn't running",
+    'Check you are boarding the right bus. The driver starts the trip before boarding opens.',
+  ),
+  _ => ("Couldn't record your boarding", e.message),
+};
+
 /// Student points the camera at the QR on the driver's phone.
 class StudentScanScreen extends ConsumerStatefulWidget {
   const StudentScanScreen({super.key});
@@ -55,21 +70,6 @@ class _StudentScanScreenState extends ConsumerState<StudentScanScreen> {
     await _scanner.start();
   }
 
-  /// Plain-language guidance per backend error code.
-  static (String, String) explain(ApiException e) => switch (e.code) {
-    'qr_expired' => (
-      'That code has just changed',
-      "The driver's code refreshes every 30 seconds. Scan the code on their screen again.",
-    ),
-    'qr_invalid' => ("That isn't a boarding code", "Scan the QR code shown on the driver's phone."),
-    'already_boarded' => ("You're already on board", 'Your boarding on this bus is recorded. Nothing else to do.'),
-    'bad_trip_state' => (
-      "This bus isn't running",
-      'Check you are boarding the right bus. The driver starts the trip before boarding opens.',
-    ),
-    _ => ("Couldn't record your boarding", e.message),
-  };
-
   @override
   Widget build(BuildContext context) {
     if (_receipt != null) return _Success(receipt: _receipt!);
@@ -92,8 +92,8 @@ class _StudentScanScreenState extends ConsumerState<StudentScanScreen> {
                 ? Center(
                     child: SingleChildScrollView(
                       child: SignNotice(
-                        title: explain(_error!).$1,
-                        body: explain(_error!).$2,
+                        title: explainScanError(_error!).$1,
+                        body: explainScanError(_error!).$2,
                         edge: _error!.code == 'already_boarded' ? TransitColors.go : TransitColors.late,
                         actionLabel: _error!.code == 'already_boarded' ? null : 'Scan again',
                         onAction: _retry,
@@ -126,7 +126,9 @@ class _StudentScanScreenState extends ConsumerState<StudentScanScreen> {
                     ],
                   ),
           ),
-          if (kDebugMode || kIsWeb)
+          // Development only: in a release build a pasted code (sent from someone on the bus) would let
+          // a student board from anywhere within the code's 30 seconds.
+          if (kDebugMode)
             Container(
               color: TransitColors.board,
               padding: const EdgeInsets.all(Space.gutter),

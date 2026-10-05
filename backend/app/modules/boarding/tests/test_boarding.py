@@ -98,3 +98,49 @@ async def test_manual_board_roster_and_attendance(world):
     assert by_student == {rider["id"]: "present", no_phone["id"]: "present", absentee["id"]: "absent"}
     mine = (await world.get("/boarding/me/attendance", who=absentee)).json()
     assert mine[0]["status"] == "absent"
+
+
+# ---------------- Review fixes: M5, H2 ----------------
+async def test_cancelling_a_running_trip_records_who_was_on_board(world):
+    w = await world.running_trip()
+    on_board, waiting = await world.user(Role.STUDENT), await world.user(Role.STUDENT)
+    await world.allocate(on_board, w["route"], 1)
+    await world.allocate(waiting, w["route"], 2)
+    await world.board(on_board, w["trip"]["id"], w["driver"])
+    await world.post(f"/trips/{w['trip']['id']}/cancel", {"reason": "Breakdown"})
+    rows = {r["student_id"]: r["status"] for r in (await world.get("/history/attendance")).json()}
+    assert rows == {on_board["id"]: "present", waiting["id"]: "absent"}
+
+
+async def test_cancelling_a_trip_that_never_ran_records_nothing(world):
+    route, bus, driver = await world.route(), await world.bus(), await world.user(Role.DRIVER)
+    student = await world.user(Role.STUDENT)
+    await world.allocate(student, route, 1)
+    trip = await world.todays_trip(await world.schedule(route, bus, driver))
+    await world.post(f"/trips/{trip['id']}/cancel", {"reason": "No driver"})
+    assert (await world.get("/history/attendance")).json() == []
+
+
+async def test_reconciler_writes_attendance_a_crash_skipped(world):
+    from sqlalchemy import update
+
+    from app.core.db import SessionLocal
+    from app.modules.boarding import service
+    from app.modules.trips.models import Trip, TripStatus
+
+    w = await world.running_trip()
+    student = await world.user(Role.STUDENT)
+    await world.allocate(student, w["route"], 1)
+    await world.board(student, w["trip"]["id"], w["driver"])
+    # The trip ended but the TripEnded handler never ran (server restarted in between).
+    async with SessionLocal() as s:
+        await s.execute(update(Trip).where(Trip.id == w["trip"]["id"]).values(
+            status=TripStatus.COMPLETED, ended_at=now_utc() - timedelta(minutes=10)))
+        await s.commit()
+    async with SessionLocal() as s:
+        assert await service.reconcile_attendance(s) == [w["trip"]["id"]]
+        await s.commit()
+    async with SessionLocal() as s:
+        assert await service.reconcile_attendance(s) == []  # nothing left to do
+    rows = (await world.get("/history/attendance")).json()
+    assert [(r["student_id"], r["status"]) for r in rows] == [(student["id"], "present")]

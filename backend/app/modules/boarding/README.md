@@ -46,7 +46,7 @@ push "boarding" over WS ◀────── StudentBoarded                   �
 | POST | `/boarding/check-in` `{token}` | student | board → receipt |
 | POST | `/boarding/trips/{id}/manual` `{student_id \| roll_no}` | driver (own), admin | board a student without a phone |
 | GET | `/boarding/trips/{id}/roster` | driver (own), admin | allocated riders + boarded status, in stop order |
-| GET | `/boarding/me/attendance` | student | my attendance history |
+| GET | `/boarding/me/attendance?limit` | student | my attendance history |
 
 Error codes: `qr_expired`, `qr_invalid`, `already_boarded`, `bad_trip_state`.
 
@@ -61,8 +61,15 @@ Error codes: `qr_expired`, `qr_invalid`, `already_boarded`, `bad_trip_state`.
 |---|---|
 | `TripEnded` | write attendance (idempotent) |
 
-WebSocket: on `StudentBoarded`, pushes `{"type":"boarding"}` to the driver and topic `trip:{id}`,
-so the driver's boarded list updates live.
+WebSocket: on `StudentBoarded`, pushes `{"type":"boarding"}` with the student's name to the driver,
+and only `{trip_id, boarded_count}` to topic `trip:{id}` (riders of the trip follow it and never see
+who boarded).
+
+## Attendance safety net
+Attendance is written on `TripEnded`, and on `TripCancelled` when the bus had set off (a breakdown):
+boarded riders present, the others absent. The `attendance-reconciler` job (every 5 min) writes it
+for any recent finished trip whose handler never ran (server restart, failure). It is idempotent:
+a trip with rows or an `AttendanceFinalized` event is skipped.
 
 ## Public service API
 `boarded_count(trip_id)`, `boarded_student_ids(trip_id)`, `finalize_attendance(trip_id)`,

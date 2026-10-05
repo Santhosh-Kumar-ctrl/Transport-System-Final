@@ -1,5 +1,12 @@
 # notifications: dev log
 
+## 2026-10-04: Review fixes (Review.md)
+**Changed**
+- `TripDelayed` with `notify_students: false` (the office-only last alert step) goes to admins only,
+  saying no further alerts will follow (B2).
+- New: `ScheduleSkipped` → admins ("won't run today: bus is in maintenance").
+- Retention job for read notifications (L4). `limit` must be ≥ 1 (M1).
+
 ## 2026-09-29: "Bus is near" alerts
 **Built**
 - `BusApproaching` → "Route 14 bus is 1.9 km from your stop" to waiting pickup riders, and

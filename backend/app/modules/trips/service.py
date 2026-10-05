@@ -1,7 +1,8 @@
 """Trip scheduling and the driver's start -> arrive -> end workflow.
 
-Public API for other modules: get_trip, next_stop, trip_detail(s), active_trips,
-trips_for_route_on, driver_trips, route_seat_capacity, stops_after, close_stale_trips.
+Public API for other modules: get_trip, get_trip_for_update, next_stop, trip_detail(s), active_trips,
+trips_for_route_on, driver_trips, route_seat_capacity, route_seat_capacities, stops_after,
+close_stale_trips, can_view_trip, ensure_can_view.
 """
 
 from datetime import date, datetime, timedelta
@@ -12,8 +13,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import events
 from app.core.config import settings
+from app.core.db import flush_or_conflict
 from app.core.deps import Principal
 from app.core.errors import Conflict, Forbidden, InvalidState, NotFound
+from app.core.events import DomainEvent
 from app.core.roles import Role
 from app.core.timeutil import local_to_utc, minutes_between, now_utc, today_local
 from app.modules.auth import service as auth_service
@@ -102,9 +105,37 @@ async def update_schedule(
     for k, v in changes.items():
         setattr(s, k, v)
     await session.flush()
-    await events.publish(session, "ScheduleUpdated", {"schedule_id": s.id, "changes": list(changes)},
+    trip_ids = await _apply_schedule_to_trips(session, s, changes, actor_id=actor_id)
+    await events.publish(session, "ScheduleUpdated",
+                         {"schedule_id": s.id, "changes": list(changes), "trip_ids": trip_ids},
                          aggregate=("schedule", s.id), actor_id=actor_id)
     return s
+
+
+async def _apply_schedule_to_trips(
+    session: AsyncSession, s: TripSchedule, changes: dict, *, actor_id: int | None
+) -> list[int]:
+    """Carry a schedule edit over to its trips that haven't started yet (today onwards), so the
+    day's run, its stop times and the delay watcher follow the new schedule.
+
+    Deactivating a schedule only stops future trips being generated: a trip already created
+    still runs (that is how one-off runs are made), and an admin cancels it explicitly if not."""
+    if not changes.keys() & {"departure_time", "bus_id", "driver_id"}:
+        return []
+    trips = list(await session.scalars(
+        select(Trip).where(Trip.schedule_id == s.id, Trip.status == TripStatus.SCHEDULED,
+                           Trip.service_date >= today_local())))
+    for t in trips:
+        if "departure_time" in changes:
+            departure = local_to_utc(t.service_date, s.departure_time)
+            shift = departure - t.scheduled_departure
+            t.scheduled_departure = departure
+            for e in t.stop_events:
+                e.scheduled_at += shift
+        t.bus_id = s.bus_id
+        t.driver_id = s.driver_id
+    await session.flush()
+    return [t.id for t in trips]
 
 
 async def reassign_bus_driver(
@@ -154,7 +185,14 @@ def _stop_plan(route: Route, direction: Direction, departure: datetime) -> list[
 async def generate_trips(
     session: AsyncSession, service_date: date | None = None, *, actor_id: int | None = None
 ) -> GenerateOut:
-    """Idempotently create the day's trips from active schedules."""
+    """Idempotently create the day's trips from active schedules.
+
+    A schedule whose bus is in maintenance or retired gets no trip (it could never start, and the
+    delay watcher would report it all morning). The transport office is told once per day via
+    `ScheduleSkipped`; once the bus is back or the schedule gets another bus, the next pass
+    creates the trip."""
+    if service_date is not None and service_date < today_local():
+        raise InvalidState("Trips can't be generated for a past date", code="past_date")
     service_date = service_date or today_local()
     weekday = service_date.isoweekday()
     schedules = list(
@@ -169,13 +207,20 @@ async def generate_trips(
             select(Trip.schedule_id).where(Trip.service_date == service_date, Trip.schedule_id.is_not(None))
         )
     )
-    created, existing = 0, 0
+    buses = {b.id: b for b in await session.scalars(select(Bus).where(Bus.id.in_({s.bus_id for s in schedules})))} \
+        if schedules else {}
+    created, existing, skipped = 0, 0, 0
     for s in schedules:
         if s.id in existing_ids:
             existing += 1
             continue
         route = await md_service.get_route(session, s.route_id)
         if not route.is_active or len(route.stops) < 2:
+            continue
+        bus = buses[s.bus_id]
+        if bus.status != BusStatus.ACTIVE:
+            skipped += 1
+            await _report_skipped(session, s, route, bus, service_date, actor_id=actor_id)
             continue
         departure = local_to_utc(service_date, s.departure_time)
         trip = Trip(
@@ -196,7 +241,28 @@ async def generate_trips(
             session, "TripsGenerated", {"service_date": service_date, "created": created},
             actor_id=actor_id,
         )
-    return GenerateOut(service_date=service_date, created=created, existing=existing)
+    return GenerateOut(service_date=service_date, created=created, existing=existing, skipped=skipped)
+
+
+async def _report_skipped(
+    session: AsyncSession, s: TripSchedule, route: Route, bus: Bus, service_date: date, *, actor_id: int | None
+) -> None:
+    """Publish ScheduleSkipped once per schedule and day (the generator runs every 15 minutes)."""
+    already = await session.scalar(
+        select(DomainEvent.id).where(
+            DomainEvent.type == "ScheduleSkipped", DomainEvent.aggregate_type == "schedule",
+            DomainEvent.aggregate_id == s.id, DomainEvent.payload["service_date"].astext == service_date.isoformat(),
+        ).limit(1)
+    )
+    if already:
+        return
+    await events.publish(
+        session, "ScheduleSkipped",
+        {"schedule_id": s.id, "route_id": route.id, "bus_id": bus.id, "registration_no": bus.registration_no,
+         "bus_status": bus.status.value, "direction": s.direction.value, "departure_time": s.departure_time,
+         "service_date": service_date},
+        aggregate=("schedule", s.id), actor_id=actor_id,
+    )
 
 
 # ---------------- Queries ----------------
@@ -205,6 +271,36 @@ async def get_trip(session: AsyncSession, trip_id: int) -> Trip:
     if trip is None:
         raise NotFound(f"Trip {trip_id} not found")
     return trip
+
+
+async def get_trip_for_update(session: AsyncSession, trip_id: int) -> Trip:
+    """The trip, freshly read and locked (SELECT ... FOR UPDATE) until the transaction ends.
+
+    Every state change of a trip (start, arrive, end, cancel, GPS ingest) goes through this, so a
+    double tap or a tap racing a GPS arrival runs one after the other and the second sees the
+    first's result instead of repeating it."""
+    trip = await session.get(Trip, trip_id, with_for_update=True, populate_existing=True)
+    if trip is None:
+        raise NotFound(f"Trip {trip_id} not found")
+    return trip
+
+
+async def can_view_trip(session: AsyncSession, p: Principal, trip: Trip) -> bool:
+    """Admins see every trip, drivers their own, students the trips on their allocated route."""
+    if p.role == Role.ADMIN:
+        return True
+    if p.role == Role.DRIVER:
+        return trip.driver_id == p.id
+    # Imported here: allocation depends on this module, so a top-level import would be circular.
+    from app.modules.allocation import service as alloc_service
+
+    allocation = await alloc_service.get_active(session, p.id)
+    return allocation is not None and allocation.route_id == trip.route_id
+
+
+async def ensure_can_view(session: AsyncSession, p: Principal, trip: Trip) -> None:
+    if not await can_view_trip(session, p, trip):
+        raise NotFound(f"Trip {trip.id} not found")  # don't reveal other routes' trips exist
 
 
 async def list_trips(
@@ -259,6 +355,17 @@ async def route_seat_capacity(session: AsyncSession, route_id: int) -> int | Non
     )
 
 
+async def route_seat_capacities(session: AsyncSession) -> dict[int, int]:
+    """route_seat_capacity for every route that has an active schedule, in one query."""
+    rows = await session.execute(
+        select(TripSchedule.route_id, func.min(Bus.capacity))
+        .join(Bus, Bus.id == TripSchedule.bus_id)
+        .where(TripSchedule.is_active.is_(True))
+        .group_by(TripSchedule.route_id)
+    )
+    return {route_id: cap for route_id, cap in rows.all()}
+
+
 async def trip_details(session: AsyncSession, trips: list[Trip]) -> list[TripDetail]:
     if not trips:
         return []
@@ -298,7 +405,8 @@ def _effective_time(requested: datetime | None, p: Principal) -> datetime:
     if requested is None:
         return now_utc()
     if not (settings.allow_simulation and p.role == Role.ADMIN):
-        raise Forbidden("Explicit timestamps are only allowed for admins in simulation mode")
+        raise Forbidden("Explicit timestamps are only allowed for admins with ALLOW_SIMULATION=true "
+                        "(development and demos only)", code="simulation_off")
     return requested
 
 
@@ -313,10 +421,13 @@ def _payload(trip: Trip, **extra) -> dict:
 async def start_trip(
     session: AsyncSession, trip_id: int, p: Principal, *, started_at: datetime | None = None
 ) -> Trip:
-    trip = await get_trip(session, trip_id)
+    trip = await get_trip_for_update(session, trip_id)
     _ensure_operator(trip, p)
     if trip.status != TripStatus.SCHEDULED:
         raise InvalidState(f"Trip is {trip.status.value}, cannot start", code="bad_trip_state")
+    if trip.service_date != today_local():
+        raise InvalidState(f"This trip runs on {trip.service_date:%d %b}; only today's trips can be started",
+                           code="wrong_day")
     bus = await md_service.get_bus(session, trip.bus_id)
     if bus.status != BusStatus.ACTIVE:
         raise InvalidState(f"Bus {bus.registration_no} is {bus.status.value}", code="bus_unavailable")
@@ -338,7 +449,8 @@ async def start_trip(
     first = trip.stop_events[0]  # the bus leaves from stop 1
     first.arrived_at = started
     first.delay_min = delay
-    await session.flush()
+    # The partial unique indexes catch a start that raced another one past the check above.
+    await flush_or_conflict(session, "Driver or bus already has a trip in progress", code="already_running")
     await events.publish(
         session, "TripStarted",
         _payload(trip, scheduled_departure=trip.scheduled_departure, started_at=started, delay_min=delay),
@@ -357,7 +469,7 @@ async def arrive_at_stop(
     that detected the arrival themselves (tracking's GPS geofence): the time of the fix, clamped
     between the trip start and now. The router never passes it.
     """
-    trip = await get_trip(session, trip_id)
+    trip = await get_trip_for_update(session, trip_id)
     _ensure_operator(trip, p)
     if trip.status != TripStatus.IN_PROGRESS:
         raise InvalidState("Trip is not in progress", code="bad_trip_state")
@@ -391,7 +503,7 @@ async def arrive_at_stop(
 async def end_trip(
     session: AsyncSession, trip_id: int, p: Principal, *, ended_at: datetime | None = None
 ) -> Trip:
-    trip = await get_trip(session, trip_id)
+    trip = await get_trip_for_update(session, trip_id)
     _ensure_operator(trip, p)
     if trip.status != TripStatus.IN_PROGRESS:
         raise InvalidState("Trip is not in progress", code="bad_trip_state")
@@ -446,13 +558,19 @@ async def close_stale_trips(session: AsyncSession) -> list[Trip]:
 
 
 async def cancel_trip(session: AsyncSession, trip_id: int, reason: str, p: Principal) -> Trip:
-    trip = await get_trip(session, trip_id)
+    trip = await get_trip_for_update(session, trip_id)
     if trip.status not in (TripStatus.SCHEDULED, TripStatus.IN_PROGRESS):
         raise InvalidState(f"Trip is {trip.status.value}, cannot cancel", code="bad_trip_state")
+    await _cancel(session, trip, reason, actor_id=p.id)
+    return trip
+
+
+async def _cancel(session: AsyncSession, trip: Trip, reason: str, *, actor_id: int | None) -> None:
     trip.status = TripStatus.CANCELLED
     trip.cancel_reason = reason
     trip.ended_at = now_utc()
     await session.flush()
-    await events.publish(session, "TripCancelled", _payload(trip, reason=reason),
-                         aggregate=("trip", trip.id), actor_id=p.id)
-    return trip
+    # was_running: the bus had set off, so boarding writes attendance for whoever was on it.
+    await events.publish(session, "TripCancelled",
+                         _payload(trip, reason=reason, was_running=trip.started_at is not None),
+                         aggregate=("trip", trip.id), actor_id=actor_id)

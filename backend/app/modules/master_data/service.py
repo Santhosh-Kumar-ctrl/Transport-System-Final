@@ -4,10 +4,10 @@ Public API for other modules: get_bus, get_route, get_route_stop, list_routes.
 """
 
 from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import events
+from app.core.db import flush_or_conflict
 from app.core.errors import Conflict, InvalidState, NotFound
 from app.core.roles import Role
 from app.modules.auth import service as auth_service
@@ -21,14 +21,6 @@ from app.modules.master_data.schemas import (
     StopIn,
     StopUpdate,
 )
-
-
-async def _flush_or_conflict(session: AsyncSession, message: str) -> None:
-    try:
-        await session.flush()
-    except IntegrityError as exc:
-        await session.rollback()
-        raise Conflict(message) from exc
 
 
 # ---------------- Buses ----------------
@@ -46,7 +38,7 @@ async def get_bus(session: AsyncSession, bus_id: int) -> Bus:
 async def create_bus(session: AsyncSession, data: BusIn, *, actor_id: int | None) -> Bus:
     bus = Bus(**data.model_dump())
     session.add(bus)
-    await _flush_or_conflict(session, f"Bus {data.registration_no} already exists")
+    await flush_or_conflict(session, f"Bus {data.registration_no} already exists")
     await session.refresh(bus, ["driver"])  # load now; lazy-loading later isn't async-safe
     await events.publish(session, "BusCreated", {"bus_id": bus.id, "registration_no": bus.registration_no},
                          aggregate=("bus", bus.id), actor_id=actor_id)
@@ -58,7 +50,7 @@ async def update_bus(session: AsyncSession, bus_id: int, data: BusUpdate, *, act
     old_status = bus.status
     for k, v in data.model_dump(exclude_unset=True).items():
         setattr(bus, k, v.strip().upper() if k == "registration_no" else v)
-    await _flush_or_conflict(session, "Registration number already in use")
+    await flush_or_conflict(session, "Registration number already in use")
     if bus.status != old_status:
         await events.publish(
             session, "BusStatusChanged",
@@ -111,7 +103,7 @@ async def assign_driver(
 async def delete_bus(session: AsyncSession, bus_id: int) -> None:
     bus = await get_bus(session, bus_id)
     await session.delete(bus)
-    await _flush_or_conflict(session, "Bus is referenced by schedules or trips; retire it instead")
+    await flush_or_conflict(session, "Bus is referenced by schedules or trips; retire it instead")
 
 
 # ---------------- Stops ----------------
@@ -140,14 +132,14 @@ async def update_stop(session: AsyncSession, stop_id: int, data: StopUpdate) -> 
     stop = await get_stop(session, stop_id)
     for k, v in data.model_dump(exclude_unset=True).items():
         setattr(stop, k, v)
-    await session.flush()
+    await flush_or_conflict(session, "Couldn't save the stop")
     return stop
 
 
 async def delete_stop(session: AsyncSession, stop_id: int) -> None:
     stop = await get_stop(session, stop_id)
     await session.delete(stop)
-    await _flush_or_conflict(session, "Stop is used by a route; remove it from routes first")
+    await flush_or_conflict(session, "Stop is used by a route; remove it from routes first")
 
 
 # ---------------- Routes ----------------
@@ -184,7 +176,7 @@ async def find_route_stop(session: AsyncSession, route_id: int, stop_id: int) ->
 async def create_route(session: AsyncSession, data: RouteIn, *, actor_id: int | None) -> Route:
     route = Route(**data.model_dump(), stops=[])
     session.add(route)
-    await _flush_or_conflict(session, f"Route code {data.code} already exists")
+    await flush_or_conflict(session, f"Route code {data.code} already exists")
     await events.publish(session, "RouteCreated", {"route_id": route.id, "code": route.code},
                          aggregate=("route", route.id), actor_id=actor_id)
     return route
@@ -197,7 +189,7 @@ async def update_route(
     changes = data.model_dump(exclude_unset=True)
     for k, v in changes.items():
         setattr(route, k, v)
-    await _flush_or_conflict(session, "Route code already in use")
+    await flush_or_conflict(session, "Route code already in use")
     await events.publish(session, "RouteUpdated", {"route_id": route.id, "changes": list(changes)},
                          aggregate=("route", route.id), actor_id=actor_id)
     return route
@@ -230,7 +222,7 @@ async def set_route_stops(
         rs.offset_min = item.offset_min
         new_list.append(rs)
     route.stops = new_list  # delete-orphan removes whatever is left in `existing`
-    await _flush_or_conflict(
+    await flush_or_conflict(
         session, "Cannot remove a stop that students are allocated to; reassign them first"
     )
     await events.publish(

@@ -11,7 +11,7 @@ router = APIRouter(prefix="/notifications", tags=["notifications"])
 
 
 @router.get("", response_model=list[NotificationOut])
-async def inbox(unread_only: bool = False, limit: int = Query(50, le=200), before_id: int | None = None,
+async def inbox(unread_only: bool = False, limit: int = Query(50, ge=1, le=200), before_id: int | None = None,
                 p: Principal = Depends(current_principal), session: AsyncSession = Depends(get_session)):
     return await service.list_for_user(session, p.id, unread_only=unread_only, limit=limit, before_id=before_id)
 

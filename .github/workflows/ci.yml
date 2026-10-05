@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: transit
+          POSTGRES_PASSWORD: transit
+          POSTGRES_DB: transit
+        ports: ["5433:5432"]
+        options: >-
+          --health-cmd "pg_isready -U transit" --health-interval 5s --health-timeout 3s --health-retries 20
+    defaults:
+      run:
+        working-directory: backend
+    env:
+      DATABASE_URL: postgresql+asyncpg://transit:transit@localhost:5433/transit
+      TEST_DATABASE_URL: postgresql+asyncpg://transit:transit@localhost:5433/transit_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/pyproject.toml
+      - run: pip install -e ".[dev]"
+      - name: Create the test database
+        run: PGPASSWORD=transit psql -h localhost -p 5433 -U transit -c "CREATE DATABASE transit_test"
+      - name: Migrations apply and match the models
+        run: alembic upgrade head && alembic check
+      - run: python -m pytest -q
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      - run: flutter analyze
+      - run: flutter test
+
+  api-image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t transit-api backend

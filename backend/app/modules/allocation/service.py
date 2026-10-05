@@ -10,6 +10,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import events
+from app.core.deps import Principal
 from app.core.errors import Conflict, InvalidState, NotFound
 from app.core.roles import Role
 from app.core.timeutil import now_utc, today_local
@@ -111,6 +112,8 @@ async def assign(session: AsyncSession, data: AssignIn, *, actor_id: int | None)
     if current and current.route_id == data.route_id and current.stop_id == data.stop_id:
         return AssignResult(allocation=(await to_out(session, [current]))[0], changed=False)
 
+    # Serialise allocations to the same route so two admins can't both take the last seat.
+    await session.execute(select(Route.id).where(Route.id == data.route_id).with_for_update())
     warnings: list[str] = []
     capacity = await trips_service.route_seat_capacity(session, data.route_id)
     if capacity is None:
@@ -172,12 +175,13 @@ async def bulk_assign(
     return results
 
 
-async def unassign(session: AsyncSession, student_id: int, *, actor_id: int | None) -> None:
+async def unassign(session: AsyncSession, student_id: int, *, actor_id: int | None,
+                   reason: str = "unassigned") -> None:
     current = await get_active(session, student_id)
     if current is None:
         raise NotFound("Student has no active allocation")
     route_id, stop_id = current.route_id, current.stop_id
-    _end(current, "unassigned")
+    _end(current, reason)
     await session.flush()
     await events.publish(
         session, "AllocationEnded",
@@ -204,6 +208,26 @@ async def list_allocations(
     if status:
         stmt = stmt.where(Allocation.status == status)
     return list(await session.scalars(stmt))
+
+
+async def end_for_deactivated(session: AsyncSession, student_id: int, *, actor_id: int | None) -> bool:
+    """A deactivated student gives their seat back. Returns whether they had one."""
+    if await get_active(session, student_id) is None:
+        return False
+    await unassign(session, student_id, actor_id=actor_id, reason="deactivated")
+    return True
+
+
+async def may_follow_route(session: AsyncSession, p: Principal, route_id: int) -> bool:
+    """WebSocket "route:<id>" topics: the route's allocated students and today's drivers on it."""
+    if p.role == Role.ADMIN:
+        return True
+    if p.role == Role.STUDENT:
+        a = await get_active(session, p.id)
+        return a is not None and a.route_id == route_id
+    if p.role == Role.DRIVER:
+        return any(t.route_id == route_id for t in await trips_service.driver_trips(session, p.id))
+    return False
 
 
 async def allocation_valid_on(session: AsyncSession, student_id: int, route_id: int, on: date) -> bool:

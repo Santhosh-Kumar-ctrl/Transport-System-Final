@@ -15,6 +15,13 @@ import '../data/dashboard_api.dart';
 
 const _delayThreshold = 5;
 
+/// Live messages that change the board. GPS fixes (`position`, every few seconds from every bus)
+/// don't: the live map follows those.
+bool refreshesBoard(LiveMessage m) => m.type != 'position';
+
+/// Several updates in a row (a bus arriving, then boardings) cause one refetch, this long after the first.
+const boardRefreshDelay = Duration(seconds: 2);
+
 /// The transport office's live departure board.
 class AdminBoardScreen extends ConsumerStatefulWidget {
   const AdminBoardScreen({super.key});
@@ -25,6 +32,14 @@ class AdminBoardScreen extends ConsumerStatefulWidget {
 
 class _AdminBoardScreenState extends ConsumerState<AdminBoardScreen> {
   late final Timer _clock;
+  Timer? _refetch;
+
+  void _scheduleRefresh() {
+    if (_refetch?.isActive ?? false) return;
+    _refetch = Timer(boardRefreshDelay, () {
+      if (mounted) ref.invalidate(adminDashboardProvider);
+    });
+  }
 
   @override
   void initState() {
@@ -36,13 +51,16 @@ class _AdminBoardScreenState extends ConsumerState<AdminBoardScreen> {
   @override
   void dispose() {
     _clock.cancel();
+    _refetch?.cancel();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     final dash = ref.watch(adminDashboardProvider);
-    listenLive(ref, (_) => ref.invalidate(adminDashboardProvider));
+    listenLive(ref, (m) {
+      if (refreshesBoard(m)) _scheduleRefresh();
+    });
 
     return ColoredBox(
       color: TransitColors.enamel,

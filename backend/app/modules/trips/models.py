@@ -7,11 +7,13 @@ from sqlalchemy import (
     Date,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     SmallInteger,
     String,
     Time,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -72,7 +74,15 @@ class Trip(Base, TimestampMixin):
         cascade="all, delete-orphan", lazy="selectin",
     )
 
-    __table_args__ = (UniqueConstraint("schedule_id", "service_date", name="uq_trips_schedule_date"),)
+    __table_args__ = (
+        UniqueConstraint("schedule_id", "service_date", name="uq_trips_schedule_date"),
+        # A driver drives, and a bus runs, at most one trip at a time: enforced by the database so
+        # two simultaneous "start" requests can't both win.
+        Index("uq_trips_one_running_per_driver", "driver_id", unique=True,
+              postgresql_where=text("status = 'in_progress'")),
+        Index("uq_trips_one_running_per_bus", "bus_id", unique=True,
+              postgresql_where=text("status = 'in_progress'")),
+    )
 
 
 class TripStopEvent(Base):

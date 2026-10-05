@@ -32,7 +32,7 @@ On every `StudentBoarded`: publish `CapacityWarning` when the trip first reaches
 ## API
 | Method | Path | Role |
 |---|---|---|
-| GET | `/capacity/trips/{id}` | any |
+| GET | `/capacity/trips/{id}` | admin; the trip's driver; students on its route |
 | GET | `/capacity/active` | admin |
 | GET | `/capacity/routes` | admin |
 

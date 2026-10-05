@@ -308,3 +308,56 @@ Json liveTripJson() => {
       },
   ],
 };
+
+/// A report as the admin sees it: analysed, with one confirmed finding and a found-item match.
+Json reportJson({String status = 'open', bool anonymous = false, bool analysed = true}) => {
+  'id': 5,
+  'kind': 'lost_item',
+  'description': 'Left my blue water bottle on the bus',
+  'status': status,
+  'anonymous': anonymous,
+  'trip_id': 7,
+  'service_date': '2026-10-02',
+  'direction': 'pickup',
+  'route_code': '14',
+  'route_color': '#0B5CAD',
+  'stop_name': 'Thirumangalam',
+  'created_at': at(-30),
+  'updated_at': at(-29),
+  'resolution_note': null,
+  'messages': [
+    {'id': 1, 'from_staff': true, 'body': 'We found it.', 'created_at': at(-5)},
+  ],
+  'student_id': anonymous ? null : 12,
+  'student_name': anonymous ? null : 'Priya R',
+  'roll_no': anonymous ? null : '22CSE012',
+  'bus_registration_no': 'TN09AB1401',
+  'severity': 'low',
+  'analysis_status': analysed ? 'done' : 'pending',
+  'analysed_by': analysed ? 'qwen3:4b' : null,
+  'analysed_at': analysed ? at(-29) : null,
+  'matched_found_item_id': null,
+  'closed_at': null,
+  'analysis': analysed
+      ? {
+          'claims': {'subtype': 'lost_item'},
+          'findings': [
+            {'check': 'on_this_trip', 'verdict': 'confirmed', 'detail': 'The student boarded at 07:41.', 'numbers': {}},
+            {'check': 'lost_item', 'verdict': 'partly', 'detail': 'A possible match was logged.', 'numbers': {}},
+          ],
+          'match_candidates': [
+            {
+              'found_item_id': 3,
+              'description': 'Blue steel water bottle',
+              'score': 0.75,
+              'logged_at': at(-20),
+              'bus_registration_no': 'TN09AB1401',
+            },
+          ],
+          'summary': 'Student lost a bottle; a likely match was logged.',
+          'suggested_action': 'Check found items.',
+          'draft_reply': 'Thanks, we may have it.',
+          'steps': {'read': 'qwen3:4b', 'write': 'qwen3:4b'},
+        }
+      : null,
+};

@@ -1,0 +1,27 @@
+# Caddy gets and renews HTTPS certificates for both names automatically: ports 80 and 443 must be
+# reachable from the internet and both names must point at this VM. For a local trial, use
+# WEB_DOMAIN=localhost and API_DOMAIN=api.localhost; Caddy then signs them with its own local CA.
+
+{$WEB_DOMAIN} {
+	encode zstd gzip
+	root * /srv/web
+	try_files {path} /index.html
+	file_server
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+}
+
+{$API_DOMAIN} {
+	encode zstd gzip
+	# WebSocket upgrades (/ws) pass straight through.
+	reverse_proxy api:8000
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		-Server
+	}
+}

@@ -75,6 +75,7 @@ and DEVLOG (history of decisions).
 | history | event timeline, trip & attendance reports | [README](backend/app/modules/history/README.md) | member 5 |
 | dashboard | per-role home aggregates, live board | [README](backend/app/modules/dashboard/README.md) | member 5 |
 | tracking (P1) | live bus position, GPS auto-arrival at stops, "bus is 2 km away" alerts | [README](backend/app/modules/tracking/README.md) | Team B |
+| reports (P1) | student problem reports, an AI agent (local Ollama model) that checks them against trip records and drafts replies, lost and found | [README](backend/app/modules/reports/README.md) | Team B |
 
 Shared code: [backend/app/core](backend/app/core/README.md) · [frontend](frontend/README.md) ·
 [design system](frontend/lib/design/README.md) · [database design](docs/DATABASE.md). How to work in this repo:
@@ -100,7 +101,7 @@ still waiting downstream and pushes to their phones; dashboard pushes a refresh 
 
 ## Tests
 ```bash
-cd backend && .venv/Scripts/python -m pytest -q      # 68 API/service tests incl. acceptance
+cd backend && .venv/Scripts/python -m pytest -q      # 148 API/service tests incl. acceptance
 cd frontend && flutter analyze && flutter test
 ```
 Backend tests use the `transit_test` database created by `docker compose`.
@@ -114,6 +115,12 @@ Backend tests use the `transit_test` database created by `docker compose`.
   or hardware later). For ETA-based alerts, feed `delay_monitor.service.evaluate` with `source=gps`.
 - Push notifications (FCM): extend `notifications.service.deliver()`. `BusApproaching` and all other
   alerts then reach phones with the app closed.
+
+## Deploying
+[docs/DEPLOY.md](docs/DEPLOY.md): one VM with Docker (Postgres, the API as **one** process, Caddy for
+HTTPS and the web app), backups, updates and the Android release build. CI runs the backend tests,
+`alembic check`, `flutter analyze`/`test` and the API image build on every push
+([.github/workflows/ci.yml](.github/workflows/ci.yml)).
 
 ## Ports
 | Service | Port |

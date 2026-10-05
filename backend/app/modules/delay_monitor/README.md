@@ -20,8 +20,12 @@
 | `recovered` | a stop check-in shows the bus back under threshold |
 
 ## Alerting rules
-- Raise `TripDelayed` when delay ≥ `DELAY_THRESHOLD_MIN` (5) **and** the trip isn't already
-  delayed, **or** the delay grew by another threshold since the last alert (escalation).
+- Alerts go out in **steps** (`DELAY_ALERT_STEPS`, default 5, 15, 30, 60 min late): `TripDelayed`
+  is raised when the delay reaches a step not yet announced since the trip was last on time. After
+  the last step nothing more is raised, however long the trip stays late: a trip that never starts
+  gives at most 4 alerts, not one every 5 minutes all day.
+- Steps above `DELAY_STUDENT_ALERT_MAX_MIN` (30) go to the transport office only
+  (`notify_students: false`), except the first alert of a delay, which riders always get.
 - Raise `TripDelayResolved` when a stop check-in comes in under the threshold after a delay.
 - Manual reports always raise (a human decided it matters).
 - The payload includes `affected_stops`: every stop not yet reached, with `scheduled_at` and
@@ -38,14 +42,14 @@ The latest row per trip is that trip's alert state.
 | Method | Path | Role |
 |---|---|---|
 | POST | `/trips/{id}/delay` `{delay_min, reason}` | driver (own), admin |
-| GET | `/trips/{id}/delays` | any |
+| GET | `/trips/{id}/delays` | admin; the trip's driver; students on its route |
 | GET | `/delays?service_date=` | admin |
 | POST | `/delays/watch` | admin: run one watcher pass now |
 
 ## Events
 | Emits | Payload highlights |
 |---|---|
-| `TripDelayed` | `trip_id, route_id, driver_id, direction, delay_min, previous_delay_min, source, reason, at_sequence, at_stop_name, affected_stops[]` |
+| `TripDelayed` | `trip_id, route_id, driver_id, direction, delay_min, previous_delay_min, source, reason, at_sequence, at_stop_name, alert_step, notify_students, affected_stops[]` |
 | `TripDelayResolved` | `delay_min, previous_delay_min, remaining_stops[]` |
 
 | Consumes | Why |

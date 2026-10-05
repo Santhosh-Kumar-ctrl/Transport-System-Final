@@ -8,8 +8,12 @@ os.environ["DATABASE_URL"] = os.environ.get(
 )
 os.environ["ENABLE_BACKGROUND_TASKS"] = "false"
 os.environ["BCRYPT_ROUNDS"] = "4"
-os.environ["ALLOW_SIMULATION"] = "true"  # Fixtures explicitly opt into demo timestamps.
+os.environ["REPORT_AI"] = "rules"  # never call a real model from tests
+os.environ["ALLOW_SIMULATION"] = "true"  # tests set explicit arrival times
+os.environ["ENVIRONMENT"] = "development"
 
+import asyncio  # noqa: E402
+import json  # noqa: E402
 from datetime import datetime, time, timedelta  # noqa: E402
 from itertools import count  # noqa: E402
 
@@ -17,7 +21,7 @@ import httpx  # noqa: E402
 import pytest  # noqa: E402
 from sqlalchemy import text  # noqa: E402
 
-from app.core import events  # noqa: E402
+from app.core import events, ratelimit  # noqa: E402
 from app.core.db import SessionLocal, engine  # noqa: E402
 from app.core.roles import Role  # noqa: E402
 from app.core.timeutil import local_tz, now_utc  # noqa: E402
@@ -40,8 +44,7 @@ async def _schema():
 
 @pytest.fixture(autouse=True)
 async def _clean_db():
-    from app.core import throttle
-    throttle.reset()
+    ratelimit.reset_all()
     yield
     await events.drain()
     tables = ", ".join(t.name for t in metadata.sorted_tables)
@@ -52,6 +55,75 @@ async def _clean_db():
 @pytest.fixture(scope="session")
 def app():
     return create_app()
+
+
+class WSClient:
+    """Drives the app's /ws endpoint in the test's own event loop (Starlette's TestClient runs the
+    app in another loop, which the async database pool can't share)."""
+
+    def __init__(self, app):
+        self._to_app: asyncio.Queue = asyncio.Queue()
+        self._from_app: asyncio.Queue = asyncio.Queue()
+        scope = {"type": "websocket", "asgi": {"version": "3.0"}, "scheme": "ws", "path": "/ws", "raw_path": b"/ws",
+                 "root_path": "", "query_string": b"", "headers": [], "client": ("127.0.0.1", 5000),
+                 "server": ("test", 80), "subprotocols": []}
+        self._task = asyncio.create_task(app(scope, self._to_app.get, self._from_app.put))
+        self.closed_with: int | None = None
+
+    async def connect(self, token: str | None = None) -> "WSClient":
+        await self._to_app.put({"type": "websocket.connect"})
+        assert (await self._next())["type"] == "websocket.accept"
+        if token is not None:
+            await self.send({"action": "auth", "token": token})
+        return self
+
+    async def send(self, data) -> None:
+        await self._to_app.put({"type": "websocket.receive", "text": json.dumps(data)})
+
+    async def _next(self, timeout: float = 2.0) -> dict:
+        return await asyncio.wait_for(self._from_app.get(), timeout)
+
+    async def receive(self, timeout: float = 2.0) -> dict | None:
+        """Next JSON frame, or None once the server closed the socket (see `closed_with`)."""
+        msg = await self._next(timeout)
+        if msg["type"] == "websocket.close":
+            self.closed_with = msg.get("code")
+            return None
+        return json.loads(msg["text"])
+
+    async def drain(self, timeout: float = 0.3) -> list[dict]:
+        """Every frame that arrives within `timeout`."""
+        frames = []
+        while True:
+            try:
+                frame = await self.receive(timeout)
+            except asyncio.TimeoutError:
+                return frames
+            if frame is None:
+                return frames
+            frames.append(frame)
+
+    async def close(self) -> None:
+        await self._to_app.put({"type": "websocket.disconnect", "code": 1000})
+        try:
+            await asyncio.wait_for(self._task, 2)
+        except (asyncio.TimeoutError, Exception):  # noqa: BLE001
+            self._task.cancel()
+
+
+@pytest.fixture
+async def ws(app):
+    """Factory: `sock = await ws(token)` opens an authenticated socket; closed after the test."""
+    opened: list[WSClient] = []
+
+    async def open_socket(token: str | None = None) -> WSClient:
+        sock = await WSClient(app).connect(token)
+        opened.append(sock)
+        return sock
+
+    yield open_socket
+    for sock in opened:
+        await sock.close()
 
 
 @pytest.fixture
@@ -82,7 +154,9 @@ class World:
             await s.commit()
         r = await self.c.post("/auth/login", json={"email": email, "password": PASSWORD})
         assert r.status_code == 200, r.text
-        return {"id": u.id, "email": email, "headers": {"Authorization": f"Bearer {r.json()['access_token']}"}}
+        tokens = r.json()
+        return {"id": u.id, "email": email, "token": tokens["access_token"], "refresh": tokens["refresh_token"],
+                "headers": {"Authorization": f"Bearer {tokens['access_token']}"}}
 
     async def setup_admin(self) -> dict:
         self.admin = await self.user(Role.ADMIN, "Ada Admin")
@@ -97,6 +171,13 @@ class World:
 
     async def delete(self, url: str, who: dict | None = None, expect: int | None = 204):
         r = await self.c.delete(url, headers=(who or self.admin)["headers"])
+        if expect is not None:
+            assert r.status_code == expect, f"{url} -> {r.status_code}: {r.text}"
+        await events.drain()
+        return r
+
+    async def patch(self, url: str, body: dict, who: dict | None = None, expect: int | None = 200):
+        r = await self.c.patch(url, json=body, headers=(who or self.admin)["headers"])
         if expect is not None:
             assert r.status_code == expect, f"{url} -> {r.status_code}: {r.text}"
         await events.drain()

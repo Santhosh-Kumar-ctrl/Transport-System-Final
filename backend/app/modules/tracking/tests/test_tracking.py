@@ -176,8 +176,8 @@ async def test_live_views_carry_stops_and_latest_position(world):
     assert live[0]["next_stop_sequence"] == 2
     student = await world.user(Role.STUDENT)
     await world.get("/tracking/live", who=student, expect=403)
-    await world.get(f"/trips/{tid}/live", who=student, expect=403)
-    await world.allocate(student, w["route"], 0)
+    await world.get(f"/trips/{tid}/live", who=student, expect=404)  # not their route
+    await world.allocate(student, w["route"], 1)
     assert (await world.get(f"/trips/{tid}/live", who=student)).json()["position"] is not None
 
 
@@ -186,3 +186,31 @@ async def test_manual_arrival_still_works_and_is_labelled(world):
     await world.post(f"/trips/{w['trip']['id']}/stops/2/arrive", who=w["driver"])
     arrived = (await world.get("/history/events", type="StopArrived")).json()
     assert arrived[0]["payload"]["source"] == "manual"
+
+
+# ---------------- Review fixes: M1, L4 ----------------
+async def test_fix_times_need_a_timezone(world):
+    w = await _geo_run(world)
+    await _report(world, w, BASE_LAT, recorded_at="2026-10-04T10:00:00", expect=422)
+    await _report(world, w, BASE_LAT, recorded_at="2026-10-04T10:00:00Z")
+
+
+async def test_old_positions_are_deleted(world):
+    from datetime import timedelta
+
+    from sqlalchemy import func, select, update
+
+    from app.core.db import SessionLocal
+    from app.core.timeutil import now_utc
+    from app.modules.tracking import service
+    from app.modules.tracking.models import BusPosition
+
+    w = await _geo_run(world)
+    await _report(world, w, BASE_LAT, BASE_LAT + 0.1 * KM)
+    async with SessionLocal() as s:
+        oldest = await s.scalar(select(func.min(BusPosition.id)))
+        await s.execute(update(BusPosition).where(BusPosition.id == oldest)
+                        .values(recorded_at=now_utc() - timedelta(days=100)))
+        assert await service.delete_old_positions(s, 90) == 1
+        await s.commit()
+        assert await s.scalar(select(func.count()).select_from(BusPosition)) == 1

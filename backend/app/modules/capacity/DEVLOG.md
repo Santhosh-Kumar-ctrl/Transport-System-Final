@@ -1,5 +1,11 @@
 # capacity: dev log
 
+## 2026-10-04: Review fixes (Review.md)
+**Changed**
+- `trip_occupancies(trips)` and batched seat capacities: dashboards no longer run queries per trip (H3).
+- `check_trip_capacity` locks the trip row first, so simultaneous boardings raise an alert once (L3).
+- Trip occupancy reads are limited to who may see the trip (L7).
+
 ## 2026-09-24: Flutter screens
 **Built**
 - `SeatBlocks` (in the design system) redrawn as a top-down seat plan (2 + aisle + 2) after reviewing

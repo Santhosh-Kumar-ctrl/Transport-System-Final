@@ -17,6 +17,9 @@ class User(Base, TimestampMixin):
     phone: Mapped[str | None] = mapped_column(String(20))
     role: Mapped[Role] = mapped_column(str_enum(Role, "user_role"), index=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    # Goes into every token as `ver`. Bumped on password change or deactivation, which ends all
+    # of the user's sessions (refresh and WebSocket connects are refused for older tokens).
+    token_version: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
 
     token_version: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
 

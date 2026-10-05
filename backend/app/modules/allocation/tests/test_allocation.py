@@ -93,3 +93,14 @@ async def test_bulk_assign_reports_per_row(world):
     ]})).json()
     assert [x["ok"] for x in res] == [True, False]
     assert "full" in res[1]["error"]
+
+
+# ---------------- Review fixes: M6 ----------------
+async def test_deactivated_student_gives_their_seat_back(world):
+    route, bus, driver = await world.route(), await world.bus(capacity=1), await world.user(Role.DRIVER)
+    await world.schedule(route, bus, driver)
+    leaving, joining = await world.user(Role.STUDENT), await world.user(Role.STUDENT)
+    await world.allocate(leaving, route, 0)
+    await world.patch(f"/users/{leaving['id']}", {"is_active": False})
+    assert (await world.get("/allocations", student_id=leaving["id"])).json() == []
+    await world.allocate(joining, route, 0)  # the seat is free again

@@ -63,7 +63,7 @@ drawn nowhere and never auto-arrives.
 | Method | Path | Role | Purpose |
 |---|---|---|---|
 | POST | `/trips/{id}/positions` `{positions: [{latitude, longitude, speed_kmph?, heading_deg?, accuracy_m?, recorded_at?}]}` (1–500) | the trip's driver; admin when `ALLOW_SIMULATION` | ingest; returns `{accepted, arrived[], approaching[], position}` |
-| GET | `/trips/{id}/live` | any | route, stops with coordinates, next stop, latest position |
+| GET | `/trips/{id}/live` | admin; the trip's driver; students allocated to its route | route, stops with coordinates, next stop, latest position |
 | GET | `/tracking/live` | admin | the same for every running trip |
 
 Errors: 403 not your trip, 422 `bad_trip_state` (trip not running: the phone stops reporting).
@@ -78,6 +78,7 @@ to `route:{route_id}` subscribers and to every admin socket. Only the newest fix
 | `APPROACH_RADIUS_M` | 2000 | "bus is near" radius |
 | `MAX_FIX_ACCURACY_M` | 100 | worse fixes never trigger anything |
 | `ARRIVAL_LOOKAHEAD_STOPS` | 2 | how many unreached stops auto-arrival considers |
+| `POSITION_RETENTION_DAYS` | 90 | fixes older than this are deleted (job `position-retention`, every 6 h) |
 
 ## Events
 | Emits | Payload |

@@ -1,5 +1,5 @@
 // Transit: college transport platform. Database design (PostgreSQL 16).
-// Generated from the live schema at Alembic head 9d3e5b7c1a2f. Paste into an Eraser
+// Generated from the live schema at Alembic head bbb63096dc6b. Paste into an Eraser
 // "Entity Relationship" diagram. Colours show the module that owns (writes) each table.
 //
 // Allowed values of the string status columns (CHECK constraints):
@@ -12,6 +12,9 @@
 //   attendance_records.status: present | absent | present_unallocated
 //   delay_reports.source: start | stop_arrival | overdue | not_started | manual | recovered
 //   notifications.severity: info | warning | critical
+//   reports.kind: lateness | overcrowding | safety | lost_item | other
+//   reports.status: open | replied | closed;  reports.severity: low | normal | high | critical
+//   reports.analysis_status: pending | done | failed;  found_items.status: unclaimed | matched | returned
 // domain_events has no foreign keys on purpose: it is an append-only log of every event,
 // pointing at any table through aggregate_type + aggregate_id.
 // Labels: pk = primary key, fk = foreign key, unique = no two rows share the value.
@@ -214,6 +217,51 @@ notifications [icon: bell, color: lightblue] {
   created_at timestamp
 }
 
+// ---------- reports ----------
+reports [icon: alert-circle, color: teal] {
+  id int pk
+  student_id int fk
+  trip_id int fk
+  route_id int fk
+  stop_id int fk
+  kind string
+  description string
+  anonymous boolean
+  status string
+  severity string
+  analysis_status string
+  analysis json
+  analysed_by string
+  analysed_at timestamp
+  matched_found_item_id int fk
+  closed_at timestamp
+  closed_by int fk
+  resolution_note string
+  created_at timestamp
+  updated_at timestamp
+}
+
+report_messages [icon: alert-circle, color: teal] {
+  id int pk
+  report_id int fk
+  author_id int fk
+  from_staff boolean
+  body string
+  created_at timestamp
+}
+
+found_items [icon: alert-circle, color: teal] {
+  id int pk
+  trip_id int fk
+  bus_id int fk
+  logged_by int fk
+  description string
+  status string
+  embedding float[]
+  created_at timestamp
+  updated_at timestamp
+}
+
 // ---------- core ----------
 domain_events [icon: activity, color: gray] {
   id bigint pk
@@ -262,3 +310,14 @@ boardings.trip_id > trips.id
 delay_reports.reported_by > users.id
 delay_reports.trip_id > trips.id
 notifications.user_id > users.id
+found_items.bus_id > buses.id
+found_items.logged_by > users.id
+found_items.trip_id > trips.id
+report_messages.author_id > users.id
+report_messages.report_id > reports.id
+reports.closed_by > users.id
+reports.matched_found_item_id > found_items.id
+reports.route_id > routes.id
+reports.stop_id > stops.id
+reports.student_id > users.id
+reports.trip_id > trips.id
