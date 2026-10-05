@@ -34,7 +34,9 @@ from typing import Any
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from app.core.deps import Principal, principal_from_token
+from app.core.deps import Principal, authenticated_principal
+from app.core.db import SessionLocal
+from app.core.access import can_subscribe
 from app.core.errors import DomainError
 from app.core.events import jsonable
 from app.core.roles import Role
@@ -90,13 +92,16 @@ class Hub:
         self._by_topic: dict[str, set[WebSocket]] = defaultdict(set)
         self._topics_of: dict[WebSocket, set[str]] = defaultdict(set)
         self._principal: dict[WebSocket, Principal] = {}
+        self._tokens: dict[WebSocket, str] = {}
 
-    def add(self, ws: WebSocket, p: Principal) -> None:
+    def add(self, ws: WebSocket, p: Principal, token: str) -> None:
         self._principal[ws] = p
+        self._tokens[ws] = token
         self._by_user[p.id].add(ws)
         self._by_role[p.role].add(ws)
 
     def remove(self, ws: WebSocket) -> None:
+        self._tokens.pop(ws, None)
         p = self._principal.pop(ws, None)
         if p:
             self._by_user[p.id].discard(ws)
@@ -119,6 +124,15 @@ class Hub:
         if not targets:
             return
         frame = {"type": msg_type, "data": jsonable(data)}
+        live = []
+        for ws in list(sockets):
+            try:
+                async with SessionLocal() as session:
+                    await authenticated_principal(self._tokens[ws], session)
+                live.append(ws)
+            except (DomainError, KeyError):
+                await ws.close(code=4401)
+                self.remove(ws)
         results = await asyncio.gather(
             *(asyncio.wait_for(ws.send_json(frame), SEND_TIMEOUT_SECONDS) for ws in targets),
             return_exceptions=True,
@@ -140,7 +154,18 @@ class Hub:
         await self._send(self._by_role.get(role, set()), msg_type, data)
 
     async def send_to_topic(self, topic: str, msg_type: str, data: Any) -> None:
-        await self._send(self._by_topic.get(topic, set()), msg_type, data)
+        permitted = set()
+        async with SessionLocal() as session:
+            for ws in list(self._by_topic.get(topic, set())):
+                # A socket can disconnect (and be removed) while we await below.
+                principal = self._principal.get(ws)
+                if principal is None:
+                    continue
+                if await can_subscribe(session, principal, topic):
+                    permitted.add(ws)
+                else:
+                    self.unsubscribe(ws, topic)
+        await self._send(permitted, msg_type, data)
 
     async def disconnect_user(self, user_id: int) -> None:
         """Close every socket of a user (sessions revoked); their app must sign in again."""
@@ -214,5 +239,6 @@ async def websocket_endpoint(ws: WebSocket) -> None:
         pass
     except Exception:  # noqa: BLE001
         log.exception("WebSocket error")
+        await ws.close(code=1011)
     finally:
         hub.remove(ws)

@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_session
+from app.core.access import authorize_trip
 from app.core.deps import Principal, current_principal, require_roles
 from app.core.roles import Role
 from app.modules.tracking import service

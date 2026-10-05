@@ -1,6 +1,6 @@
 from datetime import date
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, model_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
 from app.core.roles import Role
 
@@ -49,7 +49,16 @@ class UserBrief(BaseModel):
     roll_no: str | None = None
 
 
-class UserCreate(BaseModel):
+class PasswordInput(BaseModel):
+    @field_validator("password", check_fields=False)
+    @classmethod
+    def password_byte_limit(cls, value: str | None) -> str | None:
+        if value is not None and len(value.encode("utf-8")) > 72:
+            raise ValueError("Password must be at most 72 UTF-8 bytes")
+        return value
+
+
+class UserCreate(PasswordInput):
     email: EmailStr
     password: str = Field(min_length=8, max_length=128)
     full_name: str = Field(min_length=1, max_length=120)
@@ -71,7 +80,7 @@ class UserCreate(BaseModel):
         return self
 
 
-class UserUpdate(BaseModel):
+class UserUpdate(PasswordInput):
     full_name: str | None = Field(default=None, min_length=1, max_length=120)
     phone: str | None = Field(default=None, max_length=20)
     is_active: bool | None = None
@@ -80,17 +89,17 @@ class UserUpdate(BaseModel):
     driver: DriverProfileIn | None = None
 
 
-class LoginIn(BaseModel):
+class LoginIn(PasswordInput):
     email: EmailStr
-    password: str
+    password: str = Field(min_length=1, max_length=72)
 
 
 class RefreshIn(BaseModel):
-    refresh_token: str
+    refresh_token: str = Field(min_length=1, max_length=4096)
 
 
 class TokenPair(BaseModel):
     access_token: str
-    refresh_token: str
+    refresh_token: str = Field(min_length=1, max_length=4096)
     token_type: str = "bearer"
     user: UserOut

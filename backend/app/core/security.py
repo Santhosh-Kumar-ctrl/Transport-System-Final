@@ -14,10 +14,14 @@ ALGORITHM = "HS256"
 
 
 def hash_password(password: str) -> str:
+    if len(password.encode("utf-8")) > 72:
+        raise ValueError("Password must be at most 72 UTF-8 bytes")
     return bcrypt.hashpw(password.encode(), bcrypt.gensalt(settings.bcrypt_rounds)).decode()
 
 
 def verify_password(password: str, password_hash: str) -> bool:
+    if len(password.encode("utf-8")) > 72:
+        return False
     try:
         return bcrypt.checkpw(password.encode(), password_hash.encode())
     except ValueError:
@@ -49,7 +53,8 @@ def sign(claims: dict[str, Any], ttl: timedelta) -> str:
 def verify(token: str, expected_type: str) -> dict[str, Any]:
     """Decode a token we signed and check its `typ` claim. Raises Unauthorized."""
     try:
-        payload = jwt.decode(token, settings.jwt_secret, algorithms=[ALGORITHM])
+        payload = jwt.decode(token, settings.jwt_secret, algorithms=[ALGORITHM],
+                             options={"require": ["exp", "iat", "typ"]})
     except jwt.ExpiredSignatureError as exc:
         raise Unauthorized("Token expired", code="token_expired") from exc
     except jwt.PyJWTError as exc:

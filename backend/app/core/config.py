@@ -1,3 +1,4 @@
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 DEV_JWT_SECRET = "dev-secret-change-me-dev-secret-change-me"
@@ -17,6 +18,8 @@ class Settings(BaseSettings):
     jwt_secret: str = DEV_JWT_SECRET
     access_token_minutes: int = 30
     refresh_token_days: int = 7
+    login_max_failures: int = 5  # failed logins per email (or per IP x10) before a temporary lockout
+    login_lockout_seconds: int = 900
     bcrypt_rounds: int = 12  # tests lower this for speed
 
     # College-local timezone: schedules ("07:30 departure") are interpreted in it.

@@ -2,6 +2,8 @@ from dataclasses import dataclass
 
 from fastapi import Depends
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from sqlalchemy.ext.asyncio import AsyncSession
+from app.core.db import get_session
 
 from app.core.errors import Forbidden, Unauthorized
 from app.core.roles import Role
@@ -35,10 +37,11 @@ def principal_from_token(token: str) -> Principal:
 
 async def current_principal(
     creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
+    session: AsyncSession = Depends(get_session),
 ) -> Principal:
     if creds is None:
         raise Unauthorized("Not authenticated")
-    return principal_from_token(creds.credentials)
+    return await authenticated_principal(creds.credentials, session)
 
 
 def require_roles(*roles: Role):

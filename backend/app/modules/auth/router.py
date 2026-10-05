@@ -3,6 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.db import get_session
+from app.core.errors import Unauthorized
 from app.core.deps import Principal, current_principal, require_roles
 from app.core.ratelimit import RateLimiter
 from app.core.roles import Role
@@ -27,7 +28,9 @@ async def login(body: LoginIn, request: Request, session: AsyncSession = Depends
 
 @router.post("/auth/refresh", response_model=TokenPair)
 async def refresh(body: RefreshIn, session: AsyncSession = Depends(get_session)):
-    return await service.refresh(session, body.refresh_token)
+    result = await service.refresh(session, body.refresh_token)
+    await session.commit()
+    return result
 
 
 @router.get("/auth/me", response_model=UserOut)

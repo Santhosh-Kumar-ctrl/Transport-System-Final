@@ -171,7 +171,7 @@ class _AddPersonDialogState extends ConsumerState<_AddPersonDialog> {
   final _name = TextEditingController();
   final _email = TextEditingController();
   final _phone = TextEditingController();
-  final _password = TextEditingController(text: 'transit123');
+  final _password = TextEditingController();
   final _roll = TextEditingController();
   final _dept = TextEditingController();
   final _license = TextEditingController();

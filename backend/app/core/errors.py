@@ -44,4 +44,4 @@ class InvalidState(DomainError):
 
 class TooManyRequests(DomainError):
     status_code = 429
-    code = "rate_limited"
+    code = "too_many_attempts"

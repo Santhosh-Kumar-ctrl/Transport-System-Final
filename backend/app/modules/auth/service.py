@@ -17,11 +17,22 @@ from app.core.security import (
     verify,
     verify_password_async,
 )
-from app.modules.auth.models import DriverProfile, StudentProfile, User
+from app.modules.auth.models import DriverProfile, RefreshSession, StudentProfile, User
 from app.modules.auth.schemas import TokenPair, UserBrief, UserCreate, UserOut, UserUpdate
 
 
-def _tokens(user: User) -> TokenPair:
+# Verified against when the email is unknown, so response time does not reveal which emails exist.
+_DUMMY_HASH = hash_password("timing-equalizer-not-a-real-password")
+
+
+def _digest(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def _tokens(session: AsyncSession, user: User) -> TokenPair:
+    refresh_token = create_refresh_token(user.id, user.token_version)
+    session.add(RefreshSession(token_digest=_digest(refresh_token), user_id=user.id,
+                               expires_at=now_utc() + timedelta(days=settings.refresh_token_days)))
     return TokenPair(
         access_token=create_access_token(user.id, user.role.value, user.token_version),
         refresh_token=create_refresh_token(user.id, user.token_version),
@@ -39,13 +50,17 @@ async def login(session: AsyncSession, email: str, password: str) -> TokenPair:
         raise Unauthorized("Incorrect email or password", code="bad_credentials")
     if not user.is_active:
         raise Unauthorized("Account is deactivated", code="inactive")
-    return _tokens(user)
+    return _tokens(session, user)
 
 
 async def refresh(session: AsyncSession, refresh_token: str) -> TokenPair:
     claims = verify(refresh_token, "refresh")
-    user = await session.get(User, int(claims["sub"]))
-    if user is None or not user.is_active:
+    try:
+        user_id = int(claims["sub"])
+    except (KeyError, ValueError, TypeError) as exc:
+        raise Unauthorized("Invalid token", code="token_invalid") from exc
+    user = await session.scalar(select(User).where(User.id == user_id).with_for_update())
+    if user is None or not user.is_active or claims.get("ver") != user.token_version:
         raise Unauthorized("Account unavailable", code="inactive")
     if int(claims.get("ver", 0)) != user.token_version:
         raise Unauthorized("This session has ended. Sign in again.", code="session_revoked")
@@ -163,7 +178,10 @@ async def create_user(session: AsyncSession, data: UserCreate, *, actor_id: int 
     user.student = StudentProfile(**data.student.model_dump()) if data.student else None
     user.driver = DriverProfile(**data.driver.model_dump()) if data.driver else None
     session.add(user)
-    await session.flush()
+    try:
+        await session.flush()
+    except IntegrityError as exc:  # concurrent create slipped past the checks above; DB constraints win
+        raise Conflict("Email, roll no or license already registered", code="duplicate") from exc
     await events.publish(
         session, "UserCreated", {"user_id": user.id, "role": user.role.value},
         aggregate=("user", user.id), actor_id=actor_id,

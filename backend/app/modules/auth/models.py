@@ -1,6 +1,6 @@
-from datetime import date
+from datetime import date, datetime
 
-from sqlalchemy import Boolean, Date, ForeignKey, Integer, SmallInteger, String
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, SmallInteger, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.models import Base, TimestampMixin, str_enum
@@ -19,6 +19,8 @@ class User(Base, TimestampMixin):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
     # Goes into every token as `ver`. Bumped on password change or deactivation, which ends all
     # of the user's sessions (refresh and WebSocket connects are refused for older tokens).
+    token_version: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+
     token_version: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
 
     student: Mapped["StudentProfile | None"] = relationship(
@@ -49,3 +51,11 @@ class DriverProfile(Base):
     license_expiry: Mapped[date | None] = mapped_column(Date)
 
     user: Mapped[User] = relationship(back_populates="driver")
+
+
+class RefreshSession(Base):
+    """One-use refresh credential, stored as a digest rather than a bearer token."""
+    __tablename__ = "refresh_sessions"
+    token_digest: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

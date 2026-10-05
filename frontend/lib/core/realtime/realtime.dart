@@ -76,6 +76,7 @@ class RealtimeClient {
     try {
       final ch = _open(Uri.parse('${AppConfig.wsBase}/ws'));
       await ch.ready;
+      ch.sink.add(jsonEncode({'token': token}));
       _ch = ch;
       _send({'action': 'auth', 'token': token});
       for (final t in _topics) {
@@ -129,7 +130,8 @@ class RealtimeClient {
   }
 }
 
-/// One client per signed-in user (token refreshes don't reconnect).
+/// One client per signed-in user. Token refreshes don't recreate it: the client reads the
+/// latest access token on every (re)connect, and the server closes sockets whose token expired.
 final realtimeProvider = Provider<RealtimeClient?>((ref) {
   final userId = ref.watch(sessionProvider.select((s) => s?.user.id));
   if (userId == null) return null;
